@@ -22,6 +22,10 @@
 #   WT_CLAUDE_ARGS   Args passed to claude (default: --permission-mode auto;
 #                    set to empty to launch plain `claude`)
 #   WT_ISSUE_LIMIT   How many issues to show in the picker (default: 30)
+#   WT_PROMPT_TEMPLATE
+#                    Start prompt for claude when the branch is named after an
+#                    issue; "{url}" is replaced with the issue URL. Set empty
+#                    to open claude with no prompt.
 #
 # Requirements: git, iTerm2 (macOS), and optionally `gh` (for issue lookups)
 # and `fzf` (for arrow-key pickers; falls back to a numbered menu without it).
@@ -33,6 +37,13 @@ WT_ROOT="${WT_ROOT:-$HOME/worktrees}"
 # New tabs start Claude Code in auto mode. Set WT_CLAUDE_ARGS="" for a plain
 # `claude`, or WT_NO_CLAUDE=1 to skip launching it at all.
 : "${WT_CLAUDE_ARGS=--permission-mode auto}"
+
+# Seeded as claude's first prompt when a worktree's branch is named after a
+# GitHub issue. "{url}" is replaced with that issue's URL. Assigned the long
+# way round because a "}" inside ${var=default} would end the expansion early.
+if [[ -z "${WT_PROMPT_TEMPLATE+set}" ]]; then
+  WT_PROMPT_TEMPLATE='Work on this GitHub issue: {url}'
+fi
 
 die() { echo "Error: $*" >&2; exit 1; }
 
@@ -58,14 +69,23 @@ slugify() {
     | cut -c1-50
 }
 
+# Escape a string for use inside an AppleScript double-quoted literal.
+applescript_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
 # Open $1 (a directory) in a new iTerm2 tab and run $2 (a shell command) there.
 open_iterm_tab() {
   local dir="$1"
   local cmd="${2:-}"
-  local full_cmd="cd '$dir'"
+  local full_cmd; full_cmd="cd $(printf '%q' "$dir")"
   if [[ -n "$cmd" ]]; then
     full_cmd="$full_cmd && $cmd"
   fi
+  full_cmd=$(applescript_escape "$full_cmd")
 
   osascript <<APPLESCRIPT
 tell application "iTerm2"
@@ -85,14 +105,43 @@ APPLESCRIPT
 have_fzf() { command -v fzf >/dev/null 2>&1; }
 
 # The command a freshly opened tab should run ("" means: just cd there).
+# $1 is an optional start prompt, passed to claude as its positional argument.
 claude_cmd() {
+  local prompt="${1:-}"
   if [[ "${WT_NO_CLAUDE:-0}" == "1" ]]; then
     echo ""
-  elif [[ -n "$WT_CLAUDE_ARGS" ]]; then
-    echo "claude $WT_CLAUDE_ARGS"
-  else
-    echo "claude"
+    return
   fi
+
+  local cmd="claude"
+  [[ -n "$WT_CLAUDE_ARGS" ]] && cmd="claude $WT_CLAUDE_ARGS"
+  if [[ -n "$prompt" ]]; then
+    cmd="$cmd $(printf '%q' "$prompt")"
+  fi
+  echo "$cmd"
+}
+
+# Print the URL of the issue a branch is named after ("1234-some-title" ->
+# issue 1234), or nothing when the branch has no leading issue number.
+issue_url_for_branch() {
+  local root="$1" branch="$2"
+  local num="${branch%%-*}"
+  [[ "$num" =~ ^[0-9]+$ ]] || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+  (cd "$root" && gh issue view "$num" --json url -q .url 2>/dev/null) || true
+}
+
+# Open a worktree in a new tab, seeding claude with the issue link whenever
+# the branch is named after one.
+open_worktree() {
+  local root="$1" wt_path="$2" branch="$3"
+  local url prompt=""
+  url=$(issue_url_for_branch "$root" "$branch")
+  if [[ -n "$url" && -n "$WT_PROMPT_TEMPLATE" ]]; then
+    prompt="${WT_PROMPT_TEMPLATE//\{url\}/$url}"
+    echo "Seeding claude with: $prompt"
+  fi
+  open_iterm_tab "$wt_path" "$(claude_cmd "$prompt")"
 }
 
 require_gh() {
@@ -255,8 +304,7 @@ cmd_new() {
     git -C "$root" worktree add -b "$branch" "$wt_path" "$base"
   fi
 
-  local run_cmd; run_cmd=$(claude_cmd)
-  open_iterm_tab "$wt_path" "$run_cmd"
+  open_worktree "$root" "$wt_path" "$branch"
 }
 
 # Pick one worktree (the main working tree included) and open it in a new tab.
@@ -308,7 +356,7 @@ pick_worktree_and_open() {
     || die "cannot open '${branches[$idx]}': $target no longer exists (stale worktree; clear it with 'wt rm')"
 
   echo "Opening ${branches[$idx]} at $(short_path "$target")"
-  open_iterm_tab "$target" "$(claude_cmd)"
+  open_worktree "$root" "$target" "${branches[$idx]}"
 }
 
 cmd_list() {
@@ -347,8 +395,7 @@ cmd_open() {
   local wt_path; wt_path=$(find_worktree_path "$root" "$branch")
   [[ -n "$wt_path" ]] || die "no worktree found for branch '$branch' (try 'wt list')"
 
-  local run_cmd; run_cmd=$(claude_cmd)
-  open_iterm_tab "$wt_path" "$run_cmd"
+  open_worktree "$root" "$wt_path" "$branch"
 }
 
 # Emit "path<TAB>branch" for the repo's worktrees. Pass "1" as $2 to include
@@ -582,6 +629,9 @@ Env vars:
   WT_NO_CLAUDE     Set to "1" to skip auto-running claude in the new tab
   WT_CLAUDE_ARGS   Args passed to claude (default: --permission-mode auto)
   WT_ISSUE_LIMIT   How many issues to show in the picker (default: 30)
+  WT_PROMPT_TEMPLATE
+                   Start prompt for claude on issue branches; "{url}" becomes
+                   the issue URL. Set empty for no prompt.
 EOF
 }
 
