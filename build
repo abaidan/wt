@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# build - validate and install the `wt` script to ~/bin/wt
+#
+# Usage:
+#   ./build             Validate, then install if changed
+#   ./build --force     Install even if the destination is already identical
+#   ./build --check     Validate only; never write (exit 1 on problems)
+#   ./build --diff      Show what an install would change, then exit
+#
+# Env vars:
+#   WT_INSTALL_DIR   Where to install (default: ~/bin)
+#
+# Exits non-zero if the script fails `bash -n` or shellcheck, so a broken
+# `wt` never reaches the PATH.
+
+set -euo pipefail
+
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="$SRC_DIR/wt"
+INSTALL_DIR="${WT_INSTALL_DIR:-$HOME/bin}"
+DEST="$INSTALL_DIR/wt"
+
+force=0
+mode="install"
+
+for arg in "$@"; do
+  case "$arg" in
+    --force) force=1 ;;
+    --check) mode="check" ;;
+    --diff)  mode="diff" ;;
+    -h|--help)
+      sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "build: unknown option '$arg' (try --help)" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$SRC" ]] || { echo "build: source not found: $SRC" >&2; exit 1; }
+
+# --- validate -------------------------------------------------------------
+
+echo "==> Checking syntax"
+if ! bash -n "$SRC"; then
+  echo "build: $SRC has a syntax error; not installing" >&2
+  exit 1
+fi
+
+if command -v shellcheck >/dev/null 2>&1; then
+  echo "==> Running shellcheck"
+  if ! shellcheck --severity=warning "$SRC"; then
+    echo "build: shellcheck reported problems; not installing" >&2
+    exit 1
+  fi
+else
+  echo "==> shellcheck not installed, skipping (brew install shellcheck)"
+fi
+
+# --- compare --------------------------------------------------------------
+
+if [[ "$mode" == "diff" ]]; then
+  if [[ -f "$DEST" ]] && diff -u "$DEST" "$SRC"; then
+    echo "==> No changes: $DEST matches source"
+  fi
+  exit 0
+fi
+
+if [[ "$mode" == "check" ]]; then
+  echo "==> OK (check only, nothing installed)"
+  exit 0
+fi
+
+if [[ -f "$DEST" ]] && cmp -s "$SRC" "$DEST" && (( force == 0 )); then
+  echo "==> Already up to date: $DEST"
+  exit 0
+fi
+
+# --- install --------------------------------------------------------------
+
+mkdir -p "$INSTALL_DIR"
+install -m 755 "$SRC" "$DEST"
+echo "==> Installed $SRC -> $DEST"
+
+# Warn if the copy that will actually run is not the one just installed.
+resolved="$(command -v wt 2>/dev/null || true)"
+if [[ -z "$resolved" ]]; then
+  echo "    Note: 'wt' is not on PATH. Add $INSTALL_DIR to PATH." >&2
+elif [[ "$resolved" != "$DEST" ]]; then
+  echo "    Note: 'wt' on PATH resolves to $resolved, not $DEST." >&2
+fi
