@@ -23,9 +23,11 @@
 #                    set to empty to launch plain `claude`)
 #   WT_ISSUE_LIMIT   How many issues to show in the picker (default: 30)
 #   WT_PROMPT_TEMPLATE
-#                    Start prompt for claude when the branch is named after an
-#                    issue; "{url}" is replaced with the issue URL. Set empty
-#                    to open claude with no prompt.
+#                    Prompt typed into claude (left unsent) in a newly created
+#                    worktree whose branch is named after an issue; "{url}" is
+#                    replaced with the issue URL. Set empty to disable.
+#   WT_PREFILL_DELAY Seconds to wait for claude to start before typing the
+#                    prompt (default: 6)
 #
 # Requirements: git, iTerm2 (macOS), and optionally `gh` (for issue lookups)
 # and `fzf` (for arrow-key pickers; falls back to a numbered menu without it).
@@ -78,14 +80,25 @@ applescript_escape() {
 }
 
 # Open $1 (a directory) in a new iTerm2 tab and run $2 (a shell command) there.
+# $3, if given, is typed into the running program afterwards WITHOUT a newline,
+# so it sits in the prompt box until the user presses enter themselves.
 open_iterm_tab() {
   local dir="$1"
   local cmd="${2:-}"
+  local prefill="${3:-}"
   local full_cmd; full_cmd="cd $(printf '%q' "$dir")"
   if [[ -n "$cmd" ]]; then
     full_cmd="$full_cmd && $cmd"
   fi
   full_cmd=$(applescript_escape "$full_cmd")
+
+  # Typed only after a pause, since claude needs a moment to draw its prompt
+  # box and anything sent before that is dropped.
+  local prefill_script=""
+  if [[ -n "$prefill" ]]; then
+    prefill_script="    delay ${WT_PREFILL_DELAY:-6}
+    write text \"$(applescript_escape "$prefill")\" newline no"
+  fi
 
   osascript <<APPLESCRIPT
 tell application "iTerm2"
@@ -97,6 +110,7 @@ tell application "iTerm2"
   end if
   tell current session of current window
     write text "$full_cmd"
+$prefill_script
   end tell
 end tell
 APPLESCRIPT
@@ -105,20 +119,14 @@ APPLESCRIPT
 have_fzf() { command -v fzf >/dev/null 2>&1; }
 
 # The command a freshly opened tab should run ("" means: just cd there).
-# $1 is an optional start prompt, passed to claude as its positional argument.
 claude_cmd() {
-  local prompt="${1:-}"
   if [[ "${WT_NO_CLAUDE:-0}" == "1" ]]; then
     echo ""
-    return
+  elif [[ -n "$WT_CLAUDE_ARGS" ]]; then
+    echo "claude $WT_CLAUDE_ARGS"
+  else
+    echo "claude"
   fi
-
-  local cmd="claude"
-  [[ -n "$WT_CLAUDE_ARGS" ]] && cmd="claude $WT_CLAUDE_ARGS"
-  if [[ -n "$prompt" ]]; then
-    cmd="$cmd $(printf '%q' "$prompt")"
-  fi
-  echo "$cmd"
 }
 
 # Print the URL of the issue a branch is named after ("1234-some-title" ->
@@ -131,17 +139,24 @@ issue_url_for_branch() {
   (cd "$root" && gh issue view "$num" --json url -q .url 2>/dev/null) || true
 }
 
-# Open a worktree in a new tab, seeding claude with the issue link whenever
-# the branch is named after one.
+# Open a worktree in a new tab. Pass "1" as $4 for a worktree created just
+# now: its claude gets the issue link typed into the prompt box, left unsent.
+# Reopening an existing worktree never prefills, because that session has its
+# own history and the link would only be in the way.
 open_worktree() {
-  local root="$1" wt_path="$2" branch="$3"
+  local root="$1" wt_path="$2" branch="$3" seed="${4:-0}"
+
   local url prompt=""
-  url=$(issue_url_for_branch "$root" "$branch")
-  if [[ -n "$url" && -n "$WT_PROMPT_TEMPLATE" ]]; then
-    prompt="${WT_PROMPT_TEMPLATE//\{url\}/$url}"
-    echo "Seeding claude with: $prompt"
+  if [[ "$seed" == "1" && "${WT_NO_CLAUDE:-0}" != "1" && -n "$WT_PROMPT_TEMPLATE" ]]; then
+    url=$(issue_url_for_branch "$root" "$branch")
+    if [[ -n "$url" ]]; then
+      prompt="${WT_PROMPT_TEMPLATE//\{url\}/$url}"
+      echo "Prefilling claude's prompt (press enter to send it):"
+      echo "  $prompt"
+    fi
   fi
-  open_iterm_tab "$wt_path" "$(claude_cmd "$prompt")"
+
+  open_iterm_tab "$wt_path" "$(claude_cmd)" "$prompt"
 }
 
 require_gh() {
@@ -323,7 +338,7 @@ cmd_new() {
     fi
   fi
 
-  open_worktree "$root" "$wt_path" "$branch"
+  open_worktree "$root" "$wt_path" "$branch" 1
 }
 
 # Pick one worktree (the main working tree included) and open it in a new tab.
@@ -649,8 +664,9 @@ Env vars:
   WT_CLAUDE_ARGS   Args passed to claude (default: --permission-mode auto)
   WT_ISSUE_LIMIT   How many issues to show in the picker (default: 30)
   WT_PROMPT_TEMPLATE
-                   Start prompt for claude on issue branches; "{url}" becomes
-                   the issue URL. Set empty for no prompt.
+                   Prompt typed (unsent) into claude in a NEW issue worktree;
+                   "{url}" becomes the issue URL. Set empty to disable.
+  WT_PREFILL_DELAY Seconds to wait before typing that prompt (default: 6)
 EOF
 }
 

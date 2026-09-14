@@ -22,11 +22,12 @@ Fetching open issues...
 Issue #1234: Add a retry to the upload queue
 Fetching latest 'main'...
 Creating worktree at ~/worktrees/wt/1234-add-a-retry-to-the-upload-queue
-Seeding claude with: Work on this GitHub issue: https://github.com/abaidan/wt/issues/1234
+Prefilling claude's prompt (press enter to send it):
+  Work on this GitHub issue: https://github.com/abaidan/wt/issues/1234
 ```
 
-…and a new iTerm2 tab opens in that worktree running
-`claude --permission-mode auto "Work on this GitHub issue: …"`.
+…and a new iTerm2 tab opens in that worktree running Claude Code, with the
+issue link waiting in the prompt box for you to send.
 
 ## Requirements
 
@@ -130,14 +131,29 @@ All optional, all environment variables.
 | `WT_BASE_BRANCH` | the repo's default branch | Branch to create new branches from. |
 | `WT_CLAUDE_ARGS` | `--permission-mode auto` | Arguments passed to `claude`. Set empty for a plain `claude`. |
 | `WT_NO_CLAUDE` | unset | Set to `1` to open the tab and `cd` there without launching Claude. |
-| `WT_PROMPT_TEMPLATE` | `Work on this GitHub issue: {url}` | Claude's first prompt on issue-named branches; `{url}` is replaced with the issue URL. Set empty for no prompt. |
+| `WT_PROMPT_TEMPLATE` | `Work on this GitHub issue: {url}` | Prompt typed into Claude in a newly created issue worktree; `{url}` is replaced with the issue URL. Set empty to disable. |
+| `WT_PREFILL_DELAY` | `6` | Seconds to wait for Claude to start before typing that prompt. |
 | `WT_ISSUE_LIMIT` | `30` | How many issues the picker lists. |
 
-The start prompt is derived from the branch name: a branch beginning with digits
-and a hyphen is treated as issue-named, and that issue's URL is looked up with
-`gh`. This applies on reopen as well as creation, so `wt list` into an issue
-branch also hands Claude the link. Branches without a leading number get no
-prompt.
+### The start prompt
+
+In a **newly created** worktree whose branch is named after an issue, the issue
+URL is typed into Claude's prompt box and left there — you press enter yourself,
+or edit it first, or ignore it. Nothing is submitted on your behalf.
+
+It is typed rather than passed as an argument, via iTerm2's `write … newline no`,
+which is why there's a delay: Claude needs a moment to draw its prompt box, and
+anything sent before that is dropped. If the prompt lands truncated or not at
+all, raise `WT_PREFILL_DELAY`.
+
+Two deliberate limits:
+
+- **Only new worktrees.** Reopening through `wt list`, `wt open`, or a `wt new`
+  that finds an existing worktree never prefills — that session has its own
+  history and the link would just be in the way.
+- **Only issue-named branches.** The issue number is read off the front of the
+  branch name and the URL looked up with `gh`. A branch with no leading number
+  gets nothing.
 
 ## Development
 
