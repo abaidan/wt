@@ -77,9 +77,14 @@ The worktree is created at `$WT_ROOT/<repo>/<branch>`, branched from the freshly
 fetched `origin/<default-branch>`, and opened in a new tab.
 
 Issues that already have a worktree are flagged `[worktree exists]` in the
-picker, so you don't pick one and collide with an existing path. You can type an
-issue number that isn't in the list — it's looked up on demand — which matters
-because the list is capped (see `WT_ISSUE_LIMIT`).
+picker. Picking one anyway is fine — `wt new` opens the existing worktree
+instead of failing. If only the *branch* survives (from a `wt rm` where you kept
+it), the new worktree checks that branch out rather than trying to recreate it.
+A directory that's in the way but isn't a registered worktree is the one case
+that stops with an error, since sorting that out needs a human.
+
+You can type an issue number that isn't in the list — it's looked up on demand —
+which matters because the list is capped (see `WT_ISSUE_LIMIT`).
 
 ### `wt list` — reopen a worktree
 
