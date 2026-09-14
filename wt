@@ -10,8 +10,9 @@
 #   wt new --mine             Same, narrowed to issues assigned to you
 #   wt new <issue-number>     Create a worktree/branch named after GitHub issue #<n>
 #   wt new <branch-name>      Create a worktree/branch with an explicit name
-#   wt list                   List worktrees for the current repo
-#   wt open <branch>          Open an existing worktree in a new iTerm2 tab
+#   wt list                   Pick a worktree and reopen it in a new iTerm2 tab
+#   wt list --plain           Print the plain `git worktree list` output
+#   wt open [branch]          Same as `wt list`; with a branch, opens it directly
 #   wt rm [branch]            Remove a worktree; with no argument, pick from a list
 #
 # Env vars:
@@ -135,7 +136,7 @@ pick_issue_branch() {
   # Branch names of worktrees that already exist, so the menu can flag issues
   # that are already checked out somewhere.
   local existing
-  existing=$(list_linked_worktrees "$root" | cut -f2)
+  existing=$(list_worktrees "$root" 0 | cut -f2)
 
   local label
   label=$(cd "$root" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) \
@@ -258,9 +259,73 @@ cmd_new() {
   open_iterm_tab "$wt_path" "$run_cmd"
 }
 
+# Pick one worktree (the main working tree included) and open it in a new tab.
+pick_worktree_and_open() {
+  local root="$1"
+
+  local -a paths=() branches=()
+  local path branch
+  while IFS=$'\t' read -r path branch; do
+    [[ -n "$path" ]] || continue
+    paths[${#paths[@]}]="$path"
+    branches[${#branches[@]}]="$branch"
+  done < <(list_worktrees "$root" 1)
+
+  (( ${#paths[@]} > 0 )) || die "no worktrees found for this repo"
+
+  local here; here=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  local i menu=""
+  for i in "${!paths[@]}"; do
+    menu="$menu$(worktree_menu_line "$i" "${paths[$i]}" "${branches[$i]}" "$here")"$'\n'
+  done
+
+  local idx
+  if have_fzf; then
+    idx=$(printf '%s' "$menu" | fzf_pick_worktrees \
+      "Worktrees for $(repo_name)   (enter to open in a new tab, esc to cancel)" \
+      --no-multi 'open > ') || { echo "Cancelled."; return; }
+    if [[ -z "$idx" ]]; then
+      echo "Cancelled."
+      return
+    fi
+  else
+    echo "Worktrees for $(repo_name):"
+    printf '%s' "$menu" | awk -F'\t' '{ printf "  %2d) %s %s\n", NR, $3, $4 }'
+    echo
+    local reply
+    read -r -p "Open which? (row number, blank to cancel): " reply || reply=""
+    if [[ -z "${reply//[[:space:]]/}" ]]; then
+      echo "Cancelled."
+      return
+    fi
+    [[ "$reply" =~ ^[0-9]+$ ]] || die "invalid selection '$reply'"
+    (( reply >= 1 && reply <= ${#paths[@]} )) || die "selection out of range: $reply"
+    idx=$((reply - 1))
+  fi
+
+  local target="${paths[$idx]}"
+  [[ -d "$target" ]] \
+    || die "cannot open '${branches[$idx]}': $target no longer exists (stale worktree; clear it with 'wt rm')"
+
+  echo "Opening ${branches[$idx]} at $(short_path "$target")"
+  open_iterm_tab "$target" "$(claude_cmd)"
+}
+
 cmd_list() {
+  local plain=0 a
+  for a in "$@"; do
+    case "$a" in
+      --plain|-p) plain=1 ;;
+      *) die "unknown option '$a' (see 'wt help')" ;;
+    esac
+  done
+
   local root; root=$(repo_root)
-  git -C "$root" worktree list
+  if (( plain )); then
+    git -C "$root" worktree list
+    return
+  fi
+  pick_worktree_and_open "$root"
 }
 
 # Look up the filesystem path of the worktree for a given branch name.
@@ -274,8 +339,11 @@ find_worktree_path() {
 
 cmd_open() {
   local branch="${1:-}"
-  [[ -n "$branch" ]] || die "usage: wt open <branch>"
   local root; root=$(repo_root)
+  if [[ -z "$branch" ]]; then
+    pick_worktree_and_open "$root"
+    return
+  fi
   local wt_path; wt_path=$(find_worktree_path "$root" "$branch")
   [[ -n "$wt_path" ]] || die "no worktree found for branch '$branch' (try 'wt list')"
 
@@ -283,18 +351,45 @@ cmd_open() {
   open_iterm_tab "$wt_path" "$run_cmd"
 }
 
-# Emit "path<TAB>branch" for every linked worktree, skipping the main working
-# tree (which git refuses to remove anyway). The main tree is always listed
-# first by `git worktree list`, hence the block counter.
-list_linked_worktrees() {
-  local root="$1"
-  git -C "$root" worktree list --porcelain | awk '
+# Emit "path<TAB>branch" for the repo's worktrees. Pass "1" as $2 to include
+# the main working tree, which git always lists first (hence the block
+# counter) and which `wt rm` must never offer.
+list_worktrees() {
+  local root="$1" include_main="${2:-0}"
+  git -C "$root" worktree list --porcelain | awk -v inc="$include_main" '
     /^worktree /{ n++; p = substr($0, 10); b = ""; next }
     /^branch /  { b = substr($0, 8); sub(/^refs\/heads\//, "", b); next }
     /^detached/ { b = "(detached)"; next }
-    /^$/        { if (n > 1 && p != "") print p "\t" b; p = ""; next }
-    END         { if (n > 1 && p != "") print p "\t" b }
+    /^$/        { if ((inc == 1 || n > 1) && p != "") print p "\t" b; p = ""; next }
+    END         { if ((inc == 1 || n > 1) && p != "") print p "\t" b }
   '
+}
+
+# Format one worktree as a menu line: "<index><TAB><path><TAB><branch><TAB><detail>".
+# fzf displays fields 3.., matches on field 1 of that (the branch name) and
+# hands back the index, so a long shared path prefix cannot match everything.
+worktree_menu_line() {
+  local idx="$1" wt_path="$2" branch="$3" here="$4" current_label="${5:-current}"
+  local marks=""
+  if [[ -d "$wt_path" ]]; then
+    worktree_is_dirty "$wt_path" && marks="$marks  [uncommitted changes]"
+  else
+    marks="$marks  [missing, stale entry]"
+  fi
+  [[ "$wt_path" == "$here" ]] && marks="$marks  [$current_label]"
+  printf '%s\t%s\t%-42s\t%s%s' \
+    "$idx" "$wt_path" "$branch" "$(short_path "$wt_path")" "$marks"
+}
+
+# Run fzf over worktree menu lines on stdin, printing the chosen index(es).
+# $1 = header, $2 = --multi or --no-multi, $3 = prompt.
+fzf_pick_worktrees() {
+  fzf --delimiter=$'\t' --with-nth=3.. --nth=1 \
+    --height=90% --border --reverse "$2" \
+    --prompt="$3" --header="$1" \
+    --preview='if [ -d {2} ]; then git -C {2} status --short --branch; echo; git -C {2} log --oneline -8; else echo "(directory is missing - stale registration)"; fi' \
+    --preview-window='right:48%:wrap' \
+  | cut -f1
 }
 
 # Abbreviate $HOME to ~ so long worktree paths stay readable in menus.
@@ -391,7 +486,7 @@ cmd_rm() {
     [[ -n "$path" ]] || continue
     paths[${#paths[@]}]="$path"
     branches[${#branches[@]}]="$branch"
-  done < <(list_linked_worktrees "$root")
+  done < <(list_worktrees "$root" 0)
 
   (( ${#paths[@]} > 0 )) \
     || die "no linked worktrees for this repo (the main working tree is not removable)"
@@ -401,17 +496,10 @@ cmd_rm() {
   # Menu lines are "<index><TAB><path><TAB><branch><TAB><detail>". fzf displays
   # fields 3.. and hands back the index; --nth=1 keeps typing matched against
   # the branch name only, so a long shared path prefix cannot match everything.
-  local i marks menu=""
+  local i menu=""
   for i in "${!paths[@]}"; do
-    marks=""
-    if [[ -d "${paths[$i]}" ]]; then
-      worktree_is_dirty "${paths[$i]}" && marks="$marks  [uncommitted changes]"
-    else
-      marks="$marks  [missing, stale entry]"
-    fi
-    [[ "${paths[$i]}" == "$here" ]] && marks="$marks  [current, cannot remove]"
-    menu="$menu$(printf '%s\t%s\t%-42s\t%s%s' \
-      "$i" "${paths[$i]}" "${branches[$i]}" "$(short_path "${paths[$i]}")" "$marks")"$'\n'
+    menu="$menu$(worktree_menu_line "$i" "${paths[$i]}" "${branches[$i]}" \
+      "$here" "current, cannot remove")"$'\n'
   done
 
   local -a chosen=()
@@ -419,18 +507,14 @@ cmd_rm() {
 
   if have_fzf; then
     local sel
-    sel=$(printf '%s' "$menu" | fzf \
-      --delimiter=$'\t' --with-nth=3.. --nth=1 \
-      --height=90% --border --reverse --multi \
-      --prompt='remove > ' \
-      --header="Worktrees for $(repo_name)   (tab to mark several, enter to confirm, esc to cancel)" \
-      --preview='if [ -d {2} ]; then git -C {2} status --short --branch; echo; git -C {2} log --oneline -8; else echo "(directory is missing - stale registration)"; fi' \
-      --preview-window='right:48%:wrap') || { echo "Cancelled."; return; }
+    sel=$(printf '%s' "$menu" | fzf_pick_worktrees \
+      "Worktrees for $(repo_name)   (tab to mark several, enter to confirm, esc to cancel)" \
+      --multi 'remove > ') || { echo "Cancelled."; return; }
     if [[ -z "$sel" ]]; then
       echo "Cancelled."
       return
     fi
-    while IFS=$'\t' read -r i _; do
+    while read -r i; do
       [[ -n "$i" ]] || continue
       chosen[${#chosen[@]}]="$i"
     done <<< "$sel"
@@ -479,7 +563,7 @@ cmd_rm() {
 }
 
 usage() {
-  cat <<EOF
+  cat <<'EOF'
 wt - git worktree helper with GitHub issue integration and iTerm2 automation
 
 Usage:
@@ -487,8 +571,9 @@ Usage:
   wt new --mine           Same, narrowed to issues assigned to you
   wt new <issue-number>   Create a worktree/branch named after GitHub issue #<n>
   wt new <branch-name>    Create a worktree/branch with an explicit name
-  wt list                 List worktrees for the current repo
-  wt open <branch>        Open an existing worktree in a new iTerm2 tab
+  wt list                 Pick a worktree and reopen it in a new iTerm2 tab
+  wt list --plain         Print plain "git worktree list" output
+  wt open [branch]        Same as "wt list"; with a branch, opens it directly
   wt rm [branch]          Remove a worktree; with no argument, pick from a list
 
 Env vars:
