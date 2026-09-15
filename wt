@@ -309,10 +309,17 @@ cmd_new() {
 
   # Already checked out somewhere? Then "new" means "take me back to it".
   local live; live=$(find_worktree_path "$root" "$branch")
-  if [[ -n "$live" && -d "$live" ]]; then
-    echo "Worktree for '$branch' already exists, opening it."
-    open_worktree "$root" "$live" "$branch"
-    return
+  if [[ -n "$live" ]]; then
+    if [[ -d "$live" ]]; then
+      echo "Worktree for '$branch' already exists, opening it."
+      open_worktree "$root" "$live" "$branch"
+      return
+    fi
+    # Registered but the directory is gone. `worktree add` does not prune
+    # stale entries itself, so without this it dies with "'$branch' is
+    # already used by worktree at <a path that no longer exists>".
+    echo "Clearing stale worktree registration at $live"
+    git -C "$root" worktree prune
   fi
 
   # A directory in the way that git knows nothing about needs a human.
