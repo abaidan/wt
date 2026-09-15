@@ -331,6 +331,24 @@ cmd_new() {
     git -C "$root" worktree prune
   fi
 
+  # Same issue, older title: the branch name derived just now carries the
+  # current slug, so the exact lookup above misses a worktree created before
+  # the issue was renamed. The picker already calls that issue checked out, so
+  # honour it rather than creating a second worktree for the same issue.
+  local num="${branch%%-*}"
+  if [[ "$num" =~ ^[0-9]+$ ]]; then
+    local found found_path found_branch
+    found=$(find_worktree_for_issue "$root" "$num")
+    if [[ -n "$found" ]]; then
+      IFS=$'\t' read -r found_path found_branch <<< "$found"
+      if [[ -d "$found_path" ]]; then
+        echo "Issue #$num is already checked out as '$found_branch', opening it."
+        open_worktree "$root" "$found_path" "$found_branch"
+        return
+      fi
+    fi
+  fi
+
   # A directory in the way that git knows nothing about needs a human.
   [[ -e "$wt_path" ]] \
     && die "path already exists and is not a worktree for '$branch': $wt_path"
@@ -424,6 +442,17 @@ cmd_list() {
     return
   fi
   pick_worktree_and_open "$root"
+}
+
+# Print "path<TAB>branch" for a worktree whose branch is named after issue $2
+# ("1234" or "1234-anything"), or nothing. The issue picker flags an issue as
+# already checked out by this same leading-number rule, so the two agree even
+# once the issue title, and with it the slug, has been edited.
+find_worktree_for_issue() {
+  local root="$1" num="$2"
+  list_worktrees "$root" 0 | awk -F'\t' -v n="$num" '
+    $2 == n || index($2, n "-") == 1 { print; exit }
+  '
 }
 
 # Look up the filesystem path of the worktree for a given branch name.

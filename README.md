@@ -78,10 +78,14 @@ fetched `origin/<default-branch>`, and opened in a new tab.
 
 Issues that already have a worktree are flagged `[worktree exists]` in the
 picker. Picking one anyway is fine — `wt new` opens the existing worktree
-instead of failing. If only the *branch* survives (from a `wt rm` where you kept
-it), the new worktree checks that branch out rather than trying to recreate it.
-A directory that's in the way but isn't a registered worktree is the one case
-that stops with an error, since sorting that out needs a human.
+instead of failing. The match is on the issue number rather than the whole
+branch name, so an issue renamed since its worktree was created still reopens
+that worktree instead of starting a second one under the new slug. If only the
+*branch* survives (from a `wt rm` where you kept it), the new worktree checks
+that branch out rather than trying to recreate it, and a worktree whose
+directory you deleted by hand is deregistered and recreated. A directory that's
+in the way but isn't a registered worktree is the one case that stops with an
+error, since sorting that out needs a human.
 
 You can type an issue number that isn't in the list — it's looked up on demand —
 which matters because the list is capped (see `WT_ISSUE_LIMIT`).
