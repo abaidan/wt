@@ -96,19 +96,28 @@ open_iterm_tab() {
   # box and anything sent before that is dropped.
   local prefill_script=""
   if [[ -n "$prefill" ]]; then
-    prefill_script="    delay ${WT_PREFILL_DELAY:-6}
+    local delay="${WT_PREFILL_DELAY:-6}"
+    [[ "$delay" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+      || die "WT_PREFILL_DELAY must be a number of seconds, not '$delay'"
+    prefill_script="    delay $delay
     write text \"$(applescript_escape "$prefill")\" newline no"
   fi
 
+  # The new session is captured before anything is written to it. Addressing
+  # "current session of current window" instead would re-resolve on every
+  # command, so the prefill typed after the delay would land in whatever tab
+  # the user had switched to by then.
   osascript <<APPLESCRIPT
 tell application "iTerm2"
   activate
   if (count of windows) = 0 then
-    create window with default profile
+    set theWindow to (create window with default profile)
   else
-    tell current window to create tab with default profile
+    set theWindow to current window
+    tell theWindow to create tab with default profile
   end if
-  tell current session of current window
+  set theSession to current session of theWindow
+  tell theSession
     write text "$full_cmd"
 $prefill_script
   end tell
