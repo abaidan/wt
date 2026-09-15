@@ -14,7 +14,7 @@ Fetching open issues...
 ┌─────────────────────────────────────────────────────────┬──────────────────────┐
 │ issue > lit                                             │ #1234                │
 │                                                         │ Convert              │
-│ ▌ #1895   Issue A LIT  │ fimename.js                    │
+│ ▌ #1895   Issue A LIT                                   │ fimename.js          │
 │   #1944   Issue B                                   ... │ to LIT components    │
 │                                                         │                      │
 │   abaidan/wt              (enter to pick, esc to cancel)│ Opened by abaidan    │
