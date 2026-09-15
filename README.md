@@ -12,18 +12,15 @@ worktrees all go through an `fzf` picker.
 $ wt new
 Fetching open issues...
 ┌─────────────────────────────────────────────────────────┬──────────────────────┐
-│   issue > retry                                         │ #1234                │
-│                                                         │ Add a retry to the   │
-│ ▌ #1234   Add a retry to the upload queue               │ upload queue         │
-│   #1240   Cache the dashboard summary query             │                      │
+│ issue > lit                                             │ #1234                │
+│                                                         │ Convert              │
+│ ▌ #1895   Issue A LIT  │ fimename.js                    │
+│   #1944   Issue B                                   ... │ to LIT components    │
 │                                                         │                      │
-│   abaidan/wt             (enter to pick, esc to cancel) │ Opened by abaidan    │
+│   abaidan/wt              (enter to pick, esc to cancel)│ Opened by abaidan    │
 └─────────────────────────────────────────────────────────┴──────────────────────┘
-Issue #1234: Add a retry to the upload queue
-Fetching latest 'main'...
-Creating worktree at ~/worktrees/wt/1234-add-a-retry-to-the-upload-queue
-Prefilling claude's prompt (press enter to send it):
-  Work on this GitHub issue: https://github.com/abaidan/wt/issues/1234
+
+
 ```
 
 …and a new iTerm2 tab opens in that worktree running Claude Code, with the
