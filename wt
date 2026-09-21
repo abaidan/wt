@@ -28,6 +28,7 @@
 #                    replaced with the issue URL. Set empty to disable.
 #   WT_PREFILL_DELAY Seconds to wait for claude to start before typing the
 #                    prompt (default: 6)
+#   WT_NO_PR         If set to "1", don't look up pull requests at all
 #
 # Requirements: git, iTerm2 (macOS), and optionally `gh` (for issue lookups)
 # and `fzf` (for arrow-key pickers; falls back to a numbered menu without it).
@@ -389,6 +390,8 @@ pick_worktree_and_open() {
 
   (( ${#paths[@]} > 0 )) || die "no worktrees found for this repo"
 
+  pr_index_load "$root" ${branches[@]+"${branches[@]}"}
+
   local here; here=$(git rev-parse --show-toplevel 2>/dev/null || true)
   local i menu=""
   for i in "${!paths[@]}"; do
@@ -491,12 +494,98 @@ list_worktrees() {
   '
 }
 
+# Turns `gh pr list` JSON into "<branch><TAB><label>" lines. Open pull
+# requests are sorted first so that a branch reusing the name of an older,
+# closed PR still shows the live one. Review and check state are only worth
+# reporting while a PR is open; once it is merged or closed they are noise.
+PR_LABEL_JQ='
+sort_by(.state != "OPEN")
+| .[]
+| [ (.statusCheckRollup // [])[]
+    | ((.conclusion // "") + " " + (.status // "") + " " + (.state // "")) ] as $checks
+| (if .state != "OPEN" then (.state | ascii_downcase)
+   elif .isDraft then "draft"
+   else "open" end) as $st
+| (if .state != "OPEN" then ""
+   elif .reviewDecision == "APPROVED" then ", approved"
+   elif .reviewDecision == "CHANGES_REQUESTED" then ", changes requested"
+   else "" end) as $review
+| (if .state != "OPEN" or ($checks | length) == 0 then ""
+   elif any($checks[]; test("FAILURE|ERROR|TIMED_OUT|CANCELLED|ACTION_REQUIRED")) then ", checks failing"
+   elif any($checks[]; test("PENDING|QUEUED|IN_PROGRESS|WAITING|REQUESTED")) then ", checks pending"
+   else ", checks passing" end) as $checkstate
+| [ .headRefName, "#\(.number) \($st)\($review)\($checkstate)" ]
+| @tsv
+'
+
+# Pull request state, cached in WT_PR_INDEX as "<branch><TAB><label>" lines.
+# Asked for per branch rather than by listing the repo's PRs, because a busy
+# repo's most recent hundred PRs are mostly other people's and would miss the
+# one belonging to a worktree branched a fortnight ago. The lookups run in
+# parallel since they are all network latency and nothing else.
+#
+# Any failure - no gh, not logged in, no GitHub remote - leaves the index
+# empty on purpose: PR annotations are a nicety and must never break a menu.
+WT_PR_INDEX=""
+pr_index_load() {
+  local root="$1"; shift
+  WT_PR_INDEX=""
+  if [[ "${WT_NO_PR:-0}" == "1" ]] || (( $# == 0 )); then
+    return 0
+  fi
+  command -v gh >/dev/null 2>&1 || return 0
+
+  local tmp
+  tmp=$(mktemp -d) || return 0
+
+  echo "Checking pull requests..." >&2
+  local branch i=0
+  for branch in "$@"; do
+    if [[ -z "$branch" || "$branch" == "(detached)" ]]; then
+      continue
+    fi
+    pr_lookup_branch "$root" "$branch" > "$tmp/$i" &
+    i=$((i + 1))
+    # Bash 3.2 has no `wait -n`, so concurrency is capped in batches instead,
+    # to stay clear of GitHub's limits on a repo with many worktrees.
+    if (( i % 8 == 0 )); then
+      wait || true
+    fi
+  done
+  wait || true
+
+  WT_PR_INDEX=$(cat "$tmp"/* 2>/dev/null || true)
+  rm -rf "$tmp"
+}
+
+# Print "<branch><TAB><label>" for one branch's pull request, or nothing.
+pr_lookup_branch() {
+  local root="$1" branch="$2"
+  local fields=number,headRefName,state,isDraft,reviewDecision,statusCheckRollup
+  (cd "$root" && gh pr list --head "$branch" --state all --limit 10 \
+     --json "$fields" --jq "$PR_LABEL_JQ" 2>/dev/null) | head -1 || true
+}
+
+# The label for a branch's pull request ("#12 open, checks failing"), or
+# nothing when it has none or the index could not be built.
+pr_label_for_branch() {
+  local branch="$1"
+  if [[ -z "$WT_PR_INDEX" || -z "$branch" || "$branch" == "(detached)" ]]; then
+    return 0
+  fi
+  printf '%s\n' "$WT_PR_INDEX" | awk -F'\t' -v b="$branch" '$1 == b { print $2; exit }'
+}
+
 # Format one worktree as a menu line: "<index><TAB><path><TAB><branch><TAB><detail>".
 # fzf displays fields 3.., matches on field 1 of that (the branch name) and
 # hands back the index, so a long shared path prefix cannot match everything.
 worktree_menu_line() {
   local idx="$1" wt_path="$2" branch="$3" here="$4" current_label="${5:-current}"
-  local marks=""
+  local marks="" pr
+  pr=$(pr_label_for_branch "$branch")
+  if [[ -n "$pr" ]]; then
+    marks="$marks  [PR $pr]"
+  fi
   if [[ -d "$wt_path" ]]; then
     worktree_is_dirty "$wt_path" && marks="$marks  [uncommitted changes]"
   else
@@ -510,10 +599,17 @@ worktree_menu_line() {
 # Run fzf over worktree menu lines on stdin, printing the chosen index(es).
 # $1 = header, $2 = --multi or --no-multi, $3 = prompt.
 fzf_pick_worktrees() {
+  # Looked up per highlighted row rather than up front, so the round trip only
+  # happens for worktrees the user actually stops on.
+  local pr_preview=""
+  if [[ "${WT_NO_PR:-0}" != "1" ]] && command -v gh >/dev/null 2>&1; then
+    pr_preview='echo; (cd {2} && gh pr view 2>/dev/null || echo "(no pull request for this branch)") | head -30;'
+  fi
+
   fzf --delimiter=$'\t' --with-nth=3.. --nth=1 \
     --height=90% --border --reverse "$2" \
     --prompt="$3" --header="$1" \
-    --preview='if [ -d {2} ]; then git -C {2} status --short --branch; echo; git -C {2} log --oneline -8; else echo "(directory is missing - stale registration)"; fi' \
+    --preview="if [ -d {2} ]; then git -C {2} status --short --branch; echo; git -C {2} log --oneline -8; $pr_preview else echo \"(directory is missing - stale registration)\"; fi" \
     --preview-window='right:48%:wrap' \
   | cut -f1
 }
@@ -601,6 +697,11 @@ cmd_rm() {
   if [[ -n "${1:-}" ]]; then
     local wt_path; wt_path=$(find_worktree_path "$root" "$1")
     [[ -n "$wt_path" ]] || die "no worktree found for branch '$1' (try 'wt list')"
+    pr_index_load "$root" "$1"
+    local pr; pr=$(pr_label_for_branch "$1")
+    if [[ -n "$pr" ]]; then
+      echo "Pull request: $pr"
+    fi
     remove_one_worktree "$wt_path" "$1"
     return
   fi
@@ -616,6 +717,8 @@ cmd_rm() {
 
   (( ${#paths[@]} > 0 )) \
     || die "no linked worktrees for this repo (the main working tree is not removable)"
+
+  pr_index_load "$root" ${branches[@]+"${branches[@]}"}
 
   local here; here=$(git rev-parse --show-toplevel 2>/dev/null || true)
 
@@ -671,8 +774,13 @@ cmd_rm() {
 
   echo
   echo "About to remove:"
+  local pr
   for i in "${chosen[@]}"; do
-    printf '  - %s  (%s)\n' "${branches[$i]}" "${paths[$i]}"
+    pr=$(pr_label_for_branch "${branches[$i]}")
+    if [[ -n "$pr" ]]; then
+      pr="  [PR $pr]"
+    fi
+    printf '  - %s  (%s)%s\n' "${branches[$i]}" "${paths[$i]}" "$pr"
   done
 
   local yn
@@ -712,6 +820,7 @@ Env vars:
                    Prompt typed (unsent) into claude in a NEW issue worktree;
                    "{url}" becomes the issue URL. Set empty to disable.
   WT_PREFILL_DELAY Seconds to wait before typing that prompt (default: 6)
+  WT_NO_PR         Set to "1" to skip pull request lookups in the menus
 EOF
 }
 

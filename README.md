@@ -6,7 +6,8 @@ rebuilding, or losing your place.
 `wt` creates a worktree, names its branch after a GitHub issue, stores it in one
 central folder, and opens it in a new iTerm2 tab with Claude Code already
 running — seeded with a link to the issue. Picking, reopening and removing
-worktrees all go through an `fzf` picker.
+worktrees all go through an `fzf` picker, which shows each worktree's pull
+request and where it stands.
 
 ```
 $ wt new
@@ -36,7 +37,7 @@ issue link waiting in the prompt box for you to send.
 | **git** | Required, with `git worktree` support. Developed against 2.54. |
 | **bash** | Required. Works on macOS's system bash 3.2. |
 | **macOS + iTerm2** | Required for opening tabs — the tab is driven by AppleScript. |
-| **[gh](https://cli.github.com)** | Optional. Needed for the issue picker, issue-named branches, and issue links. Run `gh auth login` once. |
+| **[gh](https://cli.github.com)** | Optional. Needed for the issue picker, issue-named branches, issue links, and pull request status in the `wt list` / `wt rm` pickers. Run `gh auth login` once. |
 | **[fzf](https://github.com/junegunn/fzf)** | Optional. Gives the interactive pickers; without it every picker falls back to a numbered menu. |
 | **[shellcheck](https://www.shellcheck.net)** | Optional. Used by `./build` if present. |
 
@@ -98,8 +99,29 @@ wt list --plain         # plain `git worktree list` output instead
 ```
 
 Unlike `wt rm`, this includes the repo's main working tree, since returning to
-it is a normal thing to want. The preview pane shows `git status` and recent
-commits for whichever worktree is highlighted.
+it is a normal thing to want. The preview pane shows `git status`, recent
+commits, and the pull request for whichever worktree is highlighted.
+
+Each line is annotated with the state of its branch's pull request, so you can
+see what is still in flight without leaving the picker:
+
+```
+  1234-add-a-retry-to-the-upload-queue   ~/worktrees/wt/1234-...  [PR #1240 open, changes requested, checks failing]
+  1189-cache-the-dashboard-summary       ~/worktrees/wt/1189-...  [PR #1201 merged]  [uncommitted changes]
+  spike-queue-backpressure               ~/worktrees/wt/spike-...
+```
+
+The label is `#<number>` plus the PR's state — `open`, `draft`, `merged` or
+`closed` — and, while it is still open, the review decision (`approved`,
+`changes requested`) and its checks (`checks passing`, `checks pending`,
+`checks failing`). A branch with no pull request gets no label at all.
+
+Lookups are one `gh` call per branch, run in parallel, and take roughly a
+second for a handful of worktrees. They are asked for per branch rather than
+read off `gh pr list` because in a busy repo the recent PRs are mostly other
+people's, and a worktree branched a fortnight ago would fall off the end. Any
+failure — no `gh`, not logged in, no GitHub remote — just drops the labels
+silently. Set `WT_NO_PR=1` to skip the lookups entirely.
 
 `wt open` is the same picker; `wt open <branch>` skips it and opens that branch
 directly.
@@ -110,6 +132,12 @@ directly.
 wt rm                   # pick one or more (tab marks several)
 wt rm 1234-some-branch  # remove that one directly
 ```
+
+The picker carries the same pull request labels as `wt list`, which is usually
+what you want to know before deleting anything: a `[PR #1201 merged]` is safe
+to clear away, a `[PR #1240 open, checks failing]` probably isn't. The labels
+are repeated in the confirmation list, and `wt rm <branch>` prints the branch's
+pull request before it removes anything.
 
 After the selection it lists exactly what it will remove and asks once to
 confirm, then asks per worktree whether to delete the local branch too.
@@ -137,6 +165,7 @@ All optional, all environment variables.
 | `WT_PROMPT_TEMPLATE` | `Work on this GitHub issue: {url}` | Prompt typed into Claude in a newly created issue worktree; `{url}` is replaced with the issue URL. Set empty to disable. |
 | `WT_PREFILL_DELAY` | `6` | Seconds to wait for Claude to start before typing that prompt. |
 | `WT_ISSUE_LIMIT` | `30` | How many issues the picker lists. |
+| `WT_NO_PR` | unset | Set to `1` to skip pull request lookups in the `wt list` / `wt rm` pickers. |
 
 ### The start prompt
 
