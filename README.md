@@ -100,8 +100,12 @@ wt list --plain         # plain `git worktree list` output instead
 ```
 
 Unlike `wt rm`, this includes the repo's main working tree, since returning to
-it is a normal thing to want. The preview pane shows `git status`, recent
-commits, and the pull request for whichever worktree is highlighted.
+it is a normal thing to want. The preview pane shows the worktree's path,
+`git status`, recent commits, and its pull request — description included,
+rendered as markdown rather than dumped as source, with headings, bold, code
+and tables intact. (`gh` prints raw text and a column of empty fields when it
+detects a pipe; `wt` tells it otherwise, and hands it the pane's width so the
+wrapping fits.)
 
 Each line is annotated with the state of its branch's pull request, so you can
 see what is still in flight without leaving the picker:

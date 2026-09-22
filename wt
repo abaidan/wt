@@ -51,6 +51,14 @@ if [[ -z "${WT_PROMPT_TEMPLATE+set}" ]]; then
   WT_PROMPT_TEMPLATE='Work on this GitHub issue: {url}'
 fi
 
+# This script's own path, so that the fzf preview can call back into it. A
+# bare name is left alone for the preview shell to find on PATH; a relative
+# one is anchored now, while the current directory is still known.
+WT_SELF="$0"
+if [[ "$WT_SELF" != /* && "$WT_SELF" == */* ]]; then
+  WT_SELF="$PWD/$WT_SELF"
+fi
+
 die() { echo "Error: $*" >&2; exit 1; }
 
 repo_root() {
@@ -786,20 +794,57 @@ worktree_menu_line() {
     "$(worktree_location "$wt_path" "$branch")"
 }
 
+# What the fzf preview pane shows for the worktree at $1. A subcommand rather
+# than a quoted one-liner inside the fzf call, so that it can be read, and
+# checked by shellcheck, like the rest of the script.
+#
+# Colour is forced on here even though stdout is a pipe: it is a pipe straight
+# into fzf, which renders it. NO_COLOR still wins.
+cmd_preview() {
+  local wt_path="${1:-}"
+  if [[ -z "$wt_path" || ! -d "$wt_path" ]]; then
+    echo "(directory is missing - stale registration)"
+    return
+  fi
+
+  local -a git_color=(-c color.ui=always)
+  local bold=$'\033[1m' plain=$'\033[0m'
+  if [[ -n "${NO_COLOR:-}" ]]; then
+    git_color=(-c color.ui=never)
+    bold=""
+    plain=""
+  fi
+
+  printf '%s%s%s\n\n' "$bold" "$(short_path "$wt_path")" "$plain"
+  git -C "$wt_path" "${git_color[@]}" status --short --branch
+  echo
+  git -C "$wt_path" "${git_color[@]}" log --oneline --decorate -8
+  echo
+
+  if [[ "${WT_NO_PR:-0}" == "1" ]] || ! command -v gh >/dev/null 2>&1; then
+    return
+  fi
+
+  # Told to behave as though it were on a terminal, `gh` renders the
+  # description as markdown - headings, bold, code, tables - and prints a
+  # readable header instead of the raw source and a column of empty fields,
+  # which is what it falls back to when its output is a pipe. The width is
+  # the preview pane's own, so the wrapping matches the box it lands in.
+  (
+    cd "$wt_path" \
+      && GH_FORCE_TTY="${FZF_PREVIEW_COLUMNS:-80}" gh pr view 2>/dev/null
+  ) || echo "(no pull request for this branch)"
+}
+
 # Run fzf over worktree menu lines on stdin, printing the chosen index(es).
 # $1 = header, $2 = --multi or --no-multi, $3 = prompt.
 fzf_pick_worktrees() {
-  # Looked up per highlighted row rather than up front, so the round trip only
-  # happens for worktrees the user actually stops on.
-  local pr_preview=""
-  if [[ "${WT_NO_PR:-0}" != "1" ]] && command -v gh >/dev/null 2>&1; then
-    pr_preview='echo; (cd {2} && gh pr view 2>/dev/null || echo "(no pull request for this branch)") | head -30;'
-  fi
-
+  # The pull request is fetched per highlighted row rather than up front, so
+  # the round trip only happens for worktrees the user actually stops on.
   fzf --delimiter=$'\t' --with-nth=3.. --nth=1,2 --ansi \
     --height=90% --border --reverse "$2" \
     --prompt="$3" --header="$1" \
-    --preview="if [ -d {2} ]; then echo {2}; echo; git -C {2} status --short --branch; echo; git -C {2} log --oneline -8; $pr_preview else echo \"(directory is missing - stale registration)\"; fi" \
+    --preview="$(printf '%q' "$WT_SELF") __preview {2}" \
     --preview-window='right:48%:wrap' \
   | cut -f1
 }
@@ -1054,6 +1099,7 @@ case "${1:-}" in
   list) shift; cmd_list "$@" ;;
   open) shift; cmd_open "$@" ;;
   rm)   shift; cmd_rm "$@" ;;
+  __preview) shift; cmd_preview "$@" ;;
   -h|--help|help|"") usage ;;
   *) die "unknown command '$1' (see 'wt help')" ;;
 esac
