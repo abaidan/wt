@@ -78,6 +78,14 @@ capped at 50 characters.
 The worktree is created at `$WT_ROOT/<repo>/<branch>`, branched from the freshly
 fetched `origin/<default-branch>`, and opened in a new tab.
 
+The same fetch also pulls the **local** base branch up to date, so the checkout
+you came from doesn't drift a little further behind on every `wt new`. It is
+only ever a fast-forward: if your local base has commits of its own, or its
+working tree has changes the fast-forward would clobber, `wt` says so and
+leaves it exactly as it was. Either way the new worktree is cut from
+`origin/<base>`, so it starts current regardless. `WT_NO_PULL=1` fetches
+without touching the local branch.
+
 Issues that already have a worktree are flagged `[worktree exists]` in the
 picker. Picking one anyway is fine — `wt new` opens the existing worktree
 instead of failing. The match is on the issue number rather than the whole
@@ -200,6 +208,7 @@ All optional, all environment variables.
 | `WT_PROMPT_TEMPLATE` | `Work on this GitHub issue: {url}` | Prompt typed into Claude in a newly created issue worktree; `{url}` is replaced with the issue URL. Set empty to disable. |
 | `WT_PREFILL_DELAY` | `6` | Seconds to wait for Claude to start before typing that prompt. |
 | `WT_ISSUE_LIMIT` | `30` | How many issues the picker lists. |
+| `WT_NO_PULL` | unset | Set to `1` so `wt new` only fetches, leaving your local base branch where it is. |
 | `WT_NO_PR` | unset | Set to `1` to skip pull request lookups in the `wt list` / `wt rm` pickers. |
 | `NO_COLOR` | unset | Set to anything to turn off colour in the pickers. |
 | `WT_KEEP_TABS` | unset | Set to `1` to leave a removed worktree's iTerm2 tabs open. |

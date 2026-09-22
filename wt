@@ -28,6 +28,8 @@
 #                    replaced with the issue URL. Set empty to disable.
 #   WT_PREFILL_DELAY Seconds to wait for claude to start before typing the
 #                    prompt (default: 6)
+#   WT_NO_PULL       If set to "1", only fetch on `wt new`; don't fast-forward
+#                    the local base branch
 #   WT_NO_PR         If set to "1", don't look up pull requests at all
 #   NO_COLOR         If set, don't colour the pickers
 #   WT_KEEP_TABS     If set to "1", don't close the iTerm2 tabs of a removed
@@ -379,6 +381,62 @@ pick_issue_branch() {
   fi
 }
 
+# Fetch the base branch and fast-forward the local copy of it to match.
+#
+# The worktree itself is always created from origin/<base>, so this is not for
+# the new branch - it is for the checkout the user came from. Without it that
+# tree's `main` drifts further behind on every `wt new`, and the next build,
+# test run or diff there is against a stale base.
+#
+# Never anything but a fast-forward: local commits on the base branch, or a
+# working tree that would be clobbered, leave it exactly as it was with a note.
+sync_base_branch() {
+  local root="$1" base="$2"
+
+  echo "Fetching latest '$base'..."
+  git -C "$root" fetch origin "$base" --quiet 2>/dev/null \
+    || { echo "  (fetch failed - using what is already here)"; return 0; }
+
+  [[ "${WT_NO_PULL:-0}" != "1" ]] || return 0
+  git -C "$root" show-ref --verify --quiet "refs/remotes/origin/$base" || return 0
+  git -C "$root" show-ref --verify --quiet "refs/heads/$base" || return 0
+
+  local local_sha remote_sha
+  local_sha=$(git -C "$root" rev-parse "refs/heads/$base")
+  remote_sha=$(git -C "$root" rev-parse "refs/remotes/origin/$base")
+  [[ "$local_sha" != "$remote_sha" ]] || return 0
+
+  if ! git -C "$root" merge-base --is-ancestor "$local_sha" "$remote_sha"; then
+    echo "  Local '$base' has commits origin/$base does not; leaving it alone."
+    return 0
+  fi
+
+  local behind
+  behind=$(git -C "$root" rev-list --count "$local_sha..$remote_sha" 2>/dev/null) \
+    || behind=""
+
+  # Not checked out anywhere, so there is no working tree to disturb and the
+  # ref can simply be moved. The old value is passed too, so a concurrent git
+  # that moved it in the meantime makes this fail rather than overwrite.
+  local held; held=$(find_worktree_path "$root" "$base")
+  if [[ -z "$held" ]]; then
+    if git -C "$root" update-ref -m "wt: fast-forward to origin/$base" \
+         "refs/heads/$base" "$remote_sha" "$local_sha" 2>/dev/null; then
+      echo "  Fast-forwarded '$base' by ${behind:-some} commit(s)."
+    fi
+    return 0
+  fi
+
+  # Checked out somewhere: this has to go through a merge so that the index and
+  # the files on disk move with the ref. --ff-only makes git refuse rather than
+  # merge or clobber, which is the whole contract here.
+  if git -C "$held" merge --ff-only --quiet "origin/$base" 2>/dev/null; then
+    echo "  Fast-forwarded '$base' by ${behind:-some} commit(s) in $(short_path "$held")."
+  else
+    echo "  Could not fast-forward '$base' in $(short_path "$held"); leaving it alone."
+  fi
+}
+
 cmd_new() {
   local arg="" only_mine=0 a
   for a in "$@"; do
@@ -453,8 +511,7 @@ cmd_new() {
 
   mkdir -p "$(dirname "$wt_path")"
 
-  echo "Fetching latest '$base'..."
-  git -C "$root" fetch origin "$base" --quiet 2>/dev/null || true
+  sync_base_branch "$root" "$base"
 
   if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
     # Branch left behind by an earlier `wt rm` that kept it: check it out
@@ -1086,6 +1143,7 @@ Env vars:
                    Prompt typed (unsent) into claude in a NEW issue worktree;
                    "{url}" becomes the issue URL. Set empty to disable.
   WT_PREFILL_DELAY Seconds to wait before typing that prompt (default: 6)
+  WT_NO_PULL       Set to "1" to fetch only, leaving the local base branch put
   WT_NO_PR         Set to "1" to skip pull request lookups in the menus
   NO_COLOR         Set to anything to turn off colour in the pickers
   WT_KEEP_TABS     Set to "1" to leave a removed worktree's iTerm2 tabs open
