@@ -30,6 +30,8 @@
 #                    prompt (default: 6)
 #   WT_NO_PR         If set to "1", don't look up pull requests at all
 #   NO_COLOR         If set, don't colour the pickers
+#   WT_KEEP_TABS     If set to "1", don't close the iTerm2 tabs of a removed
+#                    worktree
 #
 # Requirements: git, iTerm2 (macOS), and optionally `gh` (for issue lookups)
 # and `fzf` (for arrow-key pickers; falls back to a numbered menu without it).
@@ -128,6 +130,92 @@ APPLESCRIPT
 }
 
 have_fzf() { command -v fzf >/dev/null 2>&1; }
+
+# True when anything running on terminal $1 is sitting in $2, or below it.
+# Asked of the kernel rather than of iTerm2, whose own "session.path" only
+# refreshes when the shell draws a prompt: a tab that has been running
+# `claude` since `wt` opened it still reports whatever directory it was in
+# before, which is exactly the tab that needs finding.
+tty_is_in() {
+  local tty="${1#/dev/}" dir="$2"
+
+  # lsof lives in /usr/sbin, which a login shell has on its PATH and a leaner
+  # environment may not; without it, no tab is ever matched and nothing is
+  # closed, which is the right way for this to fail.
+  local lsof_bin="lsof"
+  command -v lsof >/dev/null 2>&1 || lsof_bin=/usr/sbin/lsof
+  [[ -x "$lsof_bin" ]] || command -v "$lsof_bin" >/dev/null 2>&1 || return 1
+
+  local pids
+  pids=$(ps -t "$tty" -o pid= 2>/dev/null | tr -d ' ' | tr '\n' ',' | sed 's/,$//') \
+    || true
+  [[ -n "$pids" ]] || return 1
+
+  # lsof exits non-zero over a process that ended between the two calls, with
+  # the other answers still on stdout, so its status is deliberately ignored.
+  { "$lsof_bin" -a -d cwd -Fn -p "$pids" 2>/dev/null || true; } \
+    | awk -v d="$dir" '
+        /^n/ { p = substr($0, 2); if (p == d || index(p, d "/") == 1) { hit = 1 } }
+        END  { exit !hit }
+      '
+}
+
+# Print the id of every iTerm2 session sitting in $1, or below it. This finds
+# the tab `wt` opened for a worktree as well as any the user opened by hand.
+# Silent when iTerm2 is not running - and it is asked whether it is running
+# rather than told anything, so this never launches it.
+iterm_sessions_in() {
+  local dir="$1"
+  local sessions
+  sessions=$(osascript 2>/dev/null <<'APPLESCRIPT'
+if application "iTerm2" is running then
+  tell application "iTerm2"
+    set out to ""
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          set out to out & (id of s) & " " & (tty of s) & linefeed
+        end repeat
+      end repeat
+    end repeat
+    return out
+  end tell
+end if
+return ""
+APPLESCRIPT
+  ) || return 0
+
+  local id tty
+  while read -r id tty; do
+    [[ -n "$id" && -n "$tty" ]] || continue
+    if tty_is_in "$tty" "$dir"; then
+      echo "$id"
+    fi
+  done <<< "$sessions"
+}
+
+# Close one iTerm2 session by id. Each call rescans rather than closing a list
+# of references collected earlier, because closing a session renumbers the
+# ones after it and a stale reference would take the wrong tab with it.
+close_iterm_session() {
+  local session_id="$1"
+  osascript <<APPLESCRIPT >/dev/null 2>&1 || true
+if application "iTerm2" is running then
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s) is "$(applescript_escape "$session_id")" then
+            close s
+            return
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+end if
+APPLESCRIPT
+}
 
 # The command a freshly opened tab should run ("" means: just cd there).
 claude_cmd() {
@@ -751,6 +839,17 @@ remove_one_worktree() {
     return
   fi
 
+  # Collected before the directory goes, while iTerm2 can still say which of
+  # its tabs are sitting in it.
+  local -a tabs=()
+  local session_id
+  if [[ "${WT_KEEP_TABS:-0}" != "1" ]]; then
+    while read -r session_id; do
+      [[ -n "$session_id" ]] || continue
+      tabs[${#tabs[@]}]="$session_id"
+    done < <(iterm_sessions_in "$wt_path")
+  fi
+
   # A worktree whose directory is already gone is just a stale registration.
   # There is no work left to lose, so deregister it without prompting.
   if [[ -d "$wt_path" ]]; then
@@ -781,6 +880,21 @@ remove_one_worktree() {
   else
     echo "$out" >&2
     die "could not remove worktree at $wt_path"
+  fi
+
+  # The directory is gone, so a tab left open in it is stranded: every command
+  # it runs fails on a working directory that no longer exists, and a `claude`
+  # in it has lost the tree it was working on. Closed after the removal
+  # succeeds, never before, so a refusal leaves the session alone.
+  if (( ${#tabs[@]} > 0 )); then
+    for session_id in "${tabs[@]}"; do
+      close_iterm_session "$session_id"
+    done
+    if (( ${#tabs[@]} == 1 )); then
+      echo "Closed the iTerm2 tab that was in it"
+    else
+      echo "Closed ${#tabs[@]} iTerm2 tabs that were in it"
+    fi
   fi
 
   if [[ "$branch" != "(detached)" ]] \
@@ -929,6 +1043,7 @@ Env vars:
   WT_PREFILL_DELAY Seconds to wait before typing that prompt (default: 6)
   WT_NO_PR         Set to "1" to skip pull request lookups in the menus
   NO_COLOR         Set to anything to turn off colour in the pickers
+  WT_KEEP_TABS     Set to "1" to leave a removed worktree's iTerm2 tabs open
 EOF
 }
 

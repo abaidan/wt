@@ -174,6 +174,14 @@ Three safety behaviours, since removal is forced underneath:
   there's no work left to lose.
 - **The main working tree is never listed**, and the worktree you're currently
   standing in is flagged and skipped rather than failing mid-run.
+- **Its iTerm2 tabs are closed with it.** A tab left sitting in a directory
+  that no longer exists is stranded — every command it runs fails, and a
+  `claude` in it has lost the tree it was working on. Tabs are found by asking
+  the kernel where each session's processes actually are, not iTerm2's
+  `session.path`, which only refreshes when the shell draws a prompt and so
+  still reports the old directory for a tab that has been running `claude`
+  since it opened. They are closed only after the removal itself succeeds.
+  `WT_KEEP_TABS=1` turns this off.
 
 ## Configuration
 
@@ -190,6 +198,7 @@ All optional, all environment variables.
 | `WT_ISSUE_LIMIT` | `30` | How many issues the picker lists. |
 | `WT_NO_PR` | unset | Set to `1` to skip pull request lookups in the `wt list` / `wt rm` pickers. |
 | `NO_COLOR` | unset | Set to anything to turn off colour in the pickers. |
+| `WT_KEEP_TABS` | unset | Set to `1` to leave a removed worktree's iTerm2 tabs open. |
 
 ### The start prompt
 
