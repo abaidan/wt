@@ -29,6 +29,7 @@
 #   WT_PREFILL_DELAY Seconds to wait for claude to start before typing the
 #                    prompt (default: 6)
 #   WT_NO_PR         If set to "1", don't look up pull requests at all
+#   NO_COLOR         If set, don't colour the pickers
 #
 # Requirements: git, iTerm2 (macOS), and optionally `gh` (for issue lookups)
 # and `fzf` (for arrow-key pickers; falls back to a numbered menu without it).
@@ -391,6 +392,7 @@ pick_worktree_and_open() {
   (( ${#paths[@]} > 0 )) || die "no worktrees found for this repo"
 
   pr_index_load "$root" ${branches[@]+"${branches[@]}"}
+  menu_init "$root" ${branches[@]+"${branches[@]}"}
 
   local here; here=$(git rev-parse --show-toplevel 2>/dev/null || true)
   local i menu=""
@@ -400,8 +402,10 @@ pick_worktree_and_open() {
 
   local idx
   if have_fzf; then
+    local header
+    header="Worktrees for $(repo_name)   (type \"merged\" for landed work only)"
     idx=$(printf '%s' "$menu" | fzf_pick_worktrees \
-      "Worktrees for $(repo_name)   (enter to open in a new tab, esc to cancel)" \
+      "$header"$'\n'"enter to open in a new tab, esc to cancel" \
       --no-multi 'open > ') || { echo "Cancelled."; return; }
     if [[ -z "$idx" ]]; then
       echo "Cancelled."
@@ -409,7 +413,7 @@ pick_worktree_and_open() {
     fi
   else
     echo "Worktrees for $(repo_name):"
-    printf '%s' "$menu" | awk -F'\t' '{ printf "  %2d) %s %s\n", NR, $3, $4 }'
+    printf '%s' "$menu" | awk -F'\t' '{ printf "  %2d) %s %s %s\n", NR, $3, $4, $5 }'
     echo
     local reply
     read -r -p "Open which? (row number, blank to cancel): " reply || reply=""
@@ -494,6 +498,28 @@ list_worktrees() {
   '
 }
 
+# Colour, decided once per run: the menus are read by a human at a terminal,
+# and anywhere else - a pipe, a NO_COLOR environment - the escapes would be
+# noise. Set from the dispatcher, where stdout is still the terminal; inside
+# the $(...) that builds a menu line it no longer is.
+WT_COLOR=0
+color_init() {
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    WT_COLOR=1
+  else
+    WT_COLOR=0
+  fi
+}
+
+paint() {
+  local code="$1" text="$2"
+  if (( WT_COLOR )); then
+    printf '\033[%sm%s\033[0m' "$code" "$text"
+  else
+    printf '%s' "$text"
+  fi
+}
+
 # Turns `gh pr list` JSON into "<branch><TAB><label>" lines. Open pull
 # requests are sorted first so that a branch reusing the name of an older,
 # closed PR still shows the live one. Review and check state are only worth
@@ -576,24 +602,100 @@ pr_label_for_branch() {
   printf '%s\n' "$WT_PR_INDEX" | awk -F'\t' -v b="$branch" '$1 == b { print $2; exit }'
 }
 
-# Format one worktree as a menu line: "<index><TAB><path><TAB><branch><TAB><detail>".
-# fzf displays fields 3.., matches on field 1 of that (the branch name) and
-# hands back the index, so a long shared path prefix cannot match everything.
+# The bracketed, coloured mark for a PR label, or nothing for a branch with no
+# pull request. Merged is the one state that means removing the worktree loses
+# nothing, so it gets the tick and the green: a dozen worktrees can be scanned
+# for what is safe to clear away without reading any of them.
+pr_mark() {
+  local pr="$1"
+  case "$pr" in
+    "")      return 0 ;;
+    *merged) paint 32 "[✓ PR $pr]" ;;
+    *closed) paint 90 "[PR $pr]" ;;
+    *)       paint 33 "[PR $pr]" ;;
+  esac
+}
+
+# The repo's main working tree, which git always lists first. Taken from git
+# rather than from the current directory, so that running inside a worktree
+# still identifies the folder its siblings live in.
+main_worktree() {
+  git -C "$1" worktree list --porcelain \
+    | awk '/^worktree /{ print substr($0, 10); exit }'
+}
+
+# Per-run layout, worked out once from the worktrees about to be listed and
+# read back by worktree_menu_line. The branch column is as wide as the longest
+# branch, so the marks form a column you can run your eye down; the clamp
+# keeps one absurd branch name from pushing every mark off the screen.
+WT_BRANCH_WIDTH=42
+WT_WORKTREE_HOME=""
+menu_init() {
+  local root="$1"; shift
+  WT_WORKTREE_HOME="$WT_ROOT/$(basename "$(main_worktree "$root")")"
+
+  local b w=20
+  for b in "$@"; do
+    if (( ${#b} > w )); then
+      w=${#b}
+    fi
+  done
+  if (( w > 56 )); then
+    w=56
+  fi
+  WT_BRANCH_WIDTH="$w"
+}
+
+# Where the worktree sits - but only when that is worth a column. `wt` puts
+# everything it creates at $WT_ROOT/<repo>/<branch>, so a path per row would
+# be the same string over and over, crowding out the branch names and the
+# marks and getting truncated for its trouble. Anything that is not at its
+# expected address still says where it is: the main working tree, a directory
+# whose name no longer matches its branch, a worktree from somewhere else.
+worktree_location() {
+  local wt_path="$1" branch="$2"
+  if [[ -z "$WT_WORKTREE_HOME" || "$wt_path" == "$WT_WORKTREE_HOME/$branch" ]]; then
+    return 0
+  fi
+  if [[ "$wt_path" == "$WT_WORKTREE_HOME/"* ]]; then
+    # Only the leaf, and only a hint's worth of it: the point is that the
+    # directory is not named after the branch, not what it is called. The
+    # preview pane carries the path in full.
+    local dir="${wt_path#"$WT_WORKTREE_HOME"/}"
+    if (( ${#dir} > 30 )); then
+      dir="${dir:0:27}..."
+    fi
+    paint 90 "in $dir"
+    return 0
+  fi
+  paint 90 "$(short_path "$wt_path")"
+}
+
+# Format one worktree as a menu line:
+# "<index><TAB><path><TAB><branch><TAB><marks><TAB><location>".
+# fzf displays fields 3.. and hands back the index. Matching is limited to the
+# branch name and the marks, so a long shared path prefix cannot match
+# everything, while typing "merged" narrows the list to what is safe to remove.
 worktree_menu_line() {
   local idx="$1" wt_path="$2" branch="$3" here="$4" current_label="${5:-current}"
-  local marks="" pr
-  pr=$(pr_label_for_branch "$branch")
-  if [[ -n "$pr" ]]; then
-    marks="$marks  [PR $pr]"
+  local marks="" mark
+  mark=$(pr_mark "$(pr_label_for_branch "$branch")")
+  if [[ -n "$mark" ]]; then
+    marks="$marks $mark"
   fi
   if [[ -d "$wt_path" ]]; then
-    worktree_is_dirty "$wt_path" && marks="$marks  [uncommitted changes]"
+    if worktree_is_dirty "$wt_path"; then
+      marks="$marks $(paint 31 "[uncommitted changes]")"
+    fi
   else
-    marks="$marks  [missing, stale entry]"
+    marks="$marks $(paint 90 "[missing, stale entry]")"
   fi
-  [[ "$wt_path" == "$here" ]] && marks="$marks  [$current_label]"
-  printf '%s\t%s\t%-42s\t%s%s' \
-    "$idx" "$wt_path" "$branch" "$(short_path "$wt_path")" "$marks"
+  if [[ "$wt_path" == "$here" ]]; then
+    marks="$marks $(paint 36 "[$current_label]")"
+  fi
+  printf '%s\t%s\t%-*s\t%s\t%s' \
+    "$idx" "$wt_path" "$WT_BRANCH_WIDTH" "$branch" "${marks# }" \
+    "$(worktree_location "$wt_path" "$branch")"
 }
 
 # Run fzf over worktree menu lines on stdin, printing the chosen index(es).
@@ -606,10 +708,10 @@ fzf_pick_worktrees() {
     pr_preview='echo; (cd {2} && gh pr view 2>/dev/null || echo "(no pull request for this branch)") | head -30;'
   fi
 
-  fzf --delimiter=$'\t' --with-nth=3.. --nth=1 \
+  fzf --delimiter=$'\t' --with-nth=3.. --nth=1,2 --ansi \
     --height=90% --border --reverse "$2" \
     --prompt="$3" --header="$1" \
-    --preview="if [ -d {2} ]; then git -C {2} status --short --branch; echo; git -C {2} log --oneline -8; $pr_preview else echo \"(directory is missing - stale registration)\"; fi" \
+    --preview="if [ -d {2} ]; then echo {2}; echo; git -C {2} status --short --branch; echo; git -C {2} log --oneline -8; $pr_preview else echo \"(directory is missing - stale registration)\"; fi" \
     --preview-window='right:48%:wrap' \
   | cut -f1
 }
@@ -700,7 +802,7 @@ cmd_rm() {
     pr_index_load "$root" "$1"
     local pr; pr=$(pr_label_for_branch "$1")
     if [[ -n "$pr" ]]; then
-      echo "Pull request: $pr"
+      echo "Pull request: $(pr_mark "$pr")"
     fi
     remove_one_worktree "$wt_path" "$1"
     return
@@ -719,6 +821,7 @@ cmd_rm() {
     || die "no linked worktrees for this repo (the main working tree is not removable)"
 
   pr_index_load "$root" ${branches[@]+"${branches[@]}"}
+  menu_init "$root" ${branches[@]+"${branches[@]}"}
 
   local here; here=$(git rev-parse --show-toplevel 2>/dev/null || true)
 
@@ -736,8 +839,10 @@ cmd_rm() {
 
   if have_fzf; then
     local sel
+    local header
+    header="Worktrees for $(repo_name)   (type \"merged\" for landed work only)"
     sel=$(printf '%s' "$menu" | fzf_pick_worktrees \
-      "Worktrees for $(repo_name)   (tab to mark several, enter to confirm, esc to cancel)" \
+      "$header"$'\n'"tab to mark several, enter to confirm, esc to cancel" \
       --multi 'remove > ') || { echo "Cancelled."; return; }
     if [[ -z "$sel" ]]; then
       echo "Cancelled."
@@ -749,7 +854,7 @@ cmd_rm() {
     done <<< "$sel"
   else
     echo "Worktrees for $(repo_name):"
-    printf '%s' "$menu" | awk -F'\t' '{ printf "  %2d) %s %s\n", NR, $3, $4 }'
+    printf '%s' "$menu" | awk -F'\t' '{ printf "  %2d) %s %s %s\n", NR, $3, $4, $5 }'
     echo
     read -r -p "Remove which? (e.g. '1 3', 'all', blank to cancel): " reply
     if [[ -z "${reply//[[:space:]]/}" ]]; then
@@ -774,13 +879,13 @@ cmd_rm() {
 
   echo
   echo "About to remove:"
-  local pr
+  local mark
   for i in "${chosen[@]}"; do
-    pr=$(pr_label_for_branch "${branches[$i]}")
-    if [[ -n "$pr" ]]; then
-      pr="  [PR $pr]"
+    mark=$(pr_mark "$(pr_label_for_branch "${branches[$i]}")")
+    if [[ -n "$mark" ]]; then
+      mark="  $mark"
     fi
-    printf '  - %s  (%s)%s\n' "${branches[$i]}" "${paths[$i]}" "$pr"
+    printf '  - %s  (%s)%s\n' "${branches[$i]}" "${paths[$i]}" "$mark"
   done
 
   local yn
@@ -807,6 +912,8 @@ Usage:
   wt new <branch-name>    Create a worktree/branch with an explicit name
   wt list                 Pick a worktree and reopen it in a new iTerm2 tab
   wt list --plain         Print plain "git worktree list" output
+                          (in either picker, type "merged" to see only the
+                          worktrees whose pull request has landed)
   wt open [branch]        Same as "wt list"; with a branch, opens it directly
   wt rm [branch]          Remove a worktree; with no argument, pick from a list
 
@@ -821,8 +928,11 @@ Env vars:
                    "{url}" becomes the issue URL. Set empty to disable.
   WT_PREFILL_DELAY Seconds to wait before typing that prompt (default: 6)
   WT_NO_PR         Set to "1" to skip pull request lookups in the menus
+  NO_COLOR         Set to anything to turn off colour in the pickers
 EOF
 }
+
+color_init
 
 case "${1:-}" in
   new)  shift; cmd_new "$@" ;;

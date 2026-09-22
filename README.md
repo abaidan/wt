@@ -7,7 +7,8 @@ rebuilding, or losing your place.
 central folder, and opens it in a new iTerm2 tab with Claude Code already
 running — seeded with a link to the issue. Picking, reopening and removing
 worktrees all go through an `fzf` picker, which shows each worktree's pull
-request and where it stands.
+request and where it stands — merged ones flagged green, so finished work is
+easy to clear away.
 
 ```
 $ wt new
@@ -106,15 +107,34 @@ Each line is annotated with the state of its branch's pull request, so you can
 see what is still in flight without leaving the picker:
 
 ```
-  1234-add-a-retry-to-the-upload-queue   ~/worktrees/wt/1234-...  [PR #1240 open, changes requested, checks failing]
-  1189-cache-the-dashboard-summary       ~/worktrees/wt/1189-...  [PR #1201 merged]  [uncommitted changes]
-  spike-queue-backpressure               ~/worktrees/wt/spike-...
+  1234-add-a-retry-to-the-upload-queue   [PR #1240 open, changes requested, checks failing]
+  1189-cache-the-dashboard-summary       [✓ PR #1201 merged]  [uncommitted changes]
+  spike-queue-backpressure
 ```
 
 The label is `#<number>` plus the PR's state — `open`, `draft`, `merged` or
 `closed` — and, while it is still open, the review decision (`approved`,
 `changes requested`) and its checks (`checks passing`, `checks pending`,
 `checks failing`). A branch with no pull request gets no label at all.
+
+**Merged pull requests are marked `✓` and coloured green**, because that is the
+one state meaning the worktree can go without losing anything; still-open work
+is yellow, uncommitted changes red, a stale entry grey. Colour is off when
+output isn't a terminal, and when `NO_COLOR` is set.
+
+The marks sit in their own column, as wide as the longest branch name in the
+list, so they line up and can be read down. Typing into the picker matches the
+branch name **and** the marks — so `merged` narrows the list to exactly the
+worktrees that have landed. Paths are deliberately not matched: they all share
+a prefix, so typing would match everything.
+
+Nor are paths printed, unless there is something to say. `wt` puts every
+worktree it creates at `$WT_ROOT/<repo>/<branch>`, so a path per row is the
+same string over and over, crowding out the branch names and getting
+truncated for its trouble. A worktree that *isn't* at its expected address —
+the main working tree, or a directory whose name no longer matches its branch
+after the issue was renamed — says where it is instead. The preview pane
+always opens with the full path.
 
 Lookups are one `gh` call per branch, run in parallel, and take roughly a
 second for a handful of worktrees. They are asked for per branch rather than
@@ -134,10 +154,13 @@ wt rm 1234-some-branch  # remove that one directly
 ```
 
 The picker carries the same pull request labels as `wt list`, which is usually
-what you want to know before deleting anything: a `[PR #1201 merged]` is safe
-to clear away, a `[PR #1240 open, checks failing]` probably isn't. The labels
-are repeated in the confirmation list, and `wt rm <branch>` prints the branch's
-pull request before it removes anything.
+what you want to know before deleting anything: a green `[✓ PR #1201 merged]`
+is safe to clear away, a `[PR #1240 open, checks failing]` probably isn't. The
+labels are repeated in the confirmation list, and `wt rm <branch>` prints the
+branch's pull request before it removes anything.
+
+The quickest way to clear out finished work is therefore `wt rm`, type
+`merged`, then <kbd>Tab</kbd> through what's left and confirm.
 
 After the selection it lists exactly what it will remove and asks once to
 confirm, then asks per worktree whether to delete the local branch too.
@@ -166,6 +189,7 @@ All optional, all environment variables.
 | `WT_PREFILL_DELAY` | `6` | Seconds to wait for Claude to start before typing that prompt. |
 | `WT_ISSUE_LIMIT` | `30` | How many issues the picker lists. |
 | `WT_NO_PR` | unset | Set to `1` to skip pull request lookups in the `wt list` / `wt rm` pickers. |
+| `NO_COLOR` | unset | Set to anything to turn off colour in the pickers. |
 
 ### The start prompt
 
