@@ -10,7 +10,8 @@
 #   wt new --mine             Same, narrowed to issues assigned to you
 #   wt new <issue-number>     Create a worktree/branch named after GitHub issue #<n>
 #   wt new <branch-name>      Create a worktree/branch with an explicit name
-#   wt list                   Pick a worktree and reopen it in a new iTerm2 tab
+#   wt list                   Pick a worktree and switch to its iTerm2 tab, or
+#                             open one if it has none
 #   wt list --plain           Print the plain `git worktree list` output
 #   wt open [branch]          Same as `wt list`; with a branch, opens it directly
 #   wt rm [branch]            Remove a worktree; with no argument, pick from a list
@@ -36,6 +37,8 @@
 #                    worktree
 #   WT_NO_TAB_TITLE  If set to "1", don't put the pull request number in the
 #                    tab title of a claude that `wt` starts
+#   WT_NEW_TAB       If set to "1", always open a new tab when reopening a
+#                    worktree, even if one is already open in it
 #
 # Requirements: git, iTerm2 (macOS), and optionally `gh` (for issue lookups)
 # and `fzf` (for arrow-key pickers; falls back to a numbered menu without it).
@@ -229,6 +232,52 @@ end if
 APPLESCRIPT
 }
 
+# Bring one iTerm2 session by id to the front: its window, its tab, then the
+# session itself, so a split pane is focused too. Fails when no session has
+# that id any more, which leaves the caller free to open a tab after all.
+focus_iterm_session() {
+  local session_id="$1"
+  local found
+  found=$(osascript 2>/dev/null <<APPLESCRIPT
+if application "iTerm2" is running then
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s) is "$(applescript_escape "$session_id")" then
+            select w
+            tell t to select
+            tell s to select
+            activate
+            return "1"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+end if
+return ""
+APPLESCRIPT
+  ) || return 1
+  [[ "$found" == "1" ]]
+}
+
+# Focus a tab already sitting in worktree $1, if there is one. The tab `wt`
+# itself is running in is passed over: it's already in front, so "switching"
+# to it would do nothing, and a new tab is what's wanted from there.
+focus_existing_tab() {
+  local dir="$1"
+  [[ "${WT_NEW_TAB:-0}" != "1" ]] || return 1
+
+  local self="${ITERM_SESSION_ID#*:}"
+  local id
+  while read -r id; do
+    [[ -n "$id" && "$id" != "$self" ]] || continue
+    focus_iterm_session "$id" && return 0
+  done < <(iterm_sessions_in "$dir")
+  return 1
+}
+
 # The command a freshly opened tab should run ("" means: just cd there).
 claude_cmd() {
   if [[ "${WT_NO_CLAUDE:-0}" == "1" ]]; then
@@ -392,9 +441,15 @@ issue_url_for_branch() {
 # Open a worktree in a new tab. Pass "1" as $4 for a worktree created just
 # now: its claude gets the issue link typed into the prompt box, left unsent.
 # Reopening an existing worktree never prefills, because that session has its
-# own history and the link would only be in the way.
+# own history and the link would only be in the way - and if a tab is already
+# sitting in it, that tab is brought forward instead of opening another.
 open_worktree() {
   local root="$1" wt_path="$2" branch="$3" seed="${4:-0}"
+
+  if [[ "$seed" != "1" ]] && focus_existing_tab "$wt_path"; then
+    echo "Switched to the tab already open in it"
+    return
+  fi
 
   local url prompt=""
   if [[ "$seed" == "1" && "${WT_NO_CLAUDE:-0}" != "1" && -n "$WT_PROMPT_TEMPLATE" ]]; then
@@ -699,7 +754,7 @@ pick_worktree_and_open() {
     local header
     header="Worktrees for $(repo_name)   (type \"merged\" for landed work only)"
     idx=$(printf '%s' "$menu" | fzf_pick_worktrees \
-      "$header"$'\n'"enter to open in a new tab, esc to cancel" \
+      "$header"$'\n'"enter to switch to its tab (or open one), esc to cancel" \
       --no-multi 'open > ') || { echo "Cancelled."; return; }
     if [[ -z "$idx" ]]; then
       echo "Cancelled."
@@ -1293,7 +1348,8 @@ Usage:
   wt new --mine           Same, narrowed to issues assigned to you
   wt new <issue-number>   Create a worktree/branch named after GitHub issue #<n>
   wt new <branch-name>    Create a worktree/branch with an explicit name
-  wt list                 Pick a worktree and reopen it in a new iTerm2 tab
+  wt list                 Pick a worktree and switch to its iTerm2 tab
+                          (a new tab is opened if it has none)
   wt list --plain         Print plain "git worktree list" output
                           (in either picker, type "merged" to see only the
                           worktrees whose pull request has landed)
@@ -1315,6 +1371,8 @@ Env vars:
   NO_COLOR         Set to anything to turn off colour in the pickers
   WT_KEEP_TABS     Set to "1" to leave a removed worktree's iTerm2 tabs open
   WT_NO_TAB_TITLE  Set to "1" to keep "PR #<n>" out of the tab title
+  WT_NEW_TAB       Set to "1" to always open a new tab, even when the worktree
+                   already has one
 EOF
 }
 

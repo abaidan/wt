@@ -103,7 +103,7 @@ which matters because the list is capped (see `WT_ISSUE_LIMIT`).
 ### `wt list` — reopen a worktree
 
 ```sh
-wt list                 # pick a worktree, open it in a new tab
+wt list                 # pick a worktree, switch to its tab (or open one)
 wt list --plain         # plain `git worktree list` output instead
 ```
 
@@ -155,8 +155,16 @@ people's, and a worktree branched a fortnight ago would fall off the end. Any
 failure — no `gh`, not logged in, no GitHub remote — just drops the labels
 silently. Set `WT_NO_PR=1` to skip the lookups entirely.
 
+If an iTerm2 tab is already sitting in the chosen worktree, `wt` switches to
+it rather than opening a second one — so the `claude` already running there
+keeps its session instead of a fresh one starting beside it. Tabs are found the
+same way `wt rm` finds them (by where their processes actually are), and the
+tab you ran `wt list` from doesn't count. Only when no tab is in the worktree
+is a new one opened. `WT_NEW_TAB=1` always opens a new tab.
+
 `wt open` is the same picker; `wt open <branch>` skips it and opens that branch
-directly.
+directly. Both, like a `wt new` that finds the worktree already exists, switch
+to an existing tab the same way.
 
 ### `wt rm` — remove worktrees
 
@@ -217,6 +225,7 @@ All optional, all environment variables.
 | `NO_COLOR` | unset | Set to anything to turn off colour in the pickers. |
 | `WT_KEEP_TABS` | unset | Set to `1` to leave a removed worktree's iTerm2 tabs open. |
 | `WT_NO_TAB_TITLE` | unset | Set to `1` to keep `PR #<n>` out of the tab title. |
+| `WT_NEW_TAB` | unset | Set to `1` to always open a new tab when reopening a worktree, even if one is already open in it. |
 
 ### The start prompt
 
