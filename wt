@@ -519,18 +519,24 @@ pick_issue_branch() {
 
   # Menu lines are "<number><TAB><display>"; the number stays hidden from the
   # display but is what both fzf's preview and the parsing below read.
-  local i shown marks menu=""
+  #
+  # The mark sits between the number and the title, never after the title: fzf
+  # gives the list only about half the width next to the preview, so anything
+  # past a padded title is cut off the edge of the screen in most terminals.
+  local i n shown mark menu=""
   for i in "${!numbers[@]}"; do
-    marks=""
-    if echo "$existing" | grep -q "^${numbers[$i]}-"; then
-      marks="  [worktree exists]"
+    n="${numbers[$i]}"
+    mark=""
+    # Same rule as find_worktree_for_issue: "<n>" or "<n>-anything", so a
+    # branch named after an issue whose title slugs to nothing still counts.
+    if printf '%s\n' "$existing" | grep -qE "^${n}(-|\$)"; then
+      mark="[worktree]"
     fi
     shown="${titles[$i]}"
     if (( ${#shown} > 64 )); then
       shown="${shown:0:61}..."
     fi
-    menu="$menu$(printf '%s\t#%-6s  %-64s%s' \
-      "${numbers[$i]}" "${numbers[$i]}" "$shown" "$marks")"$'\n'
+    menu="$menu$(printf '%s\t#%-6s %-10s  %s' "$n" "$n" "$mark" "$shown")"$'\n'
   done
 
   local reply
