@@ -34,6 +34,8 @@
 #   NO_COLOR         If set, don't colour the pickers
 #   WT_KEEP_TABS     If set to "1", don't close the iTerm2 tabs of a removed
 #                    worktree
+#   WT_NO_TAB_TITLE  If set to "1", don't put the pull request number in the
+#                    tab title of a claude that `wt` starts
 #
 # Requirements: git, iTerm2 (macOS), and optionally `gh` (for issue lookups)
 # and `fzf` (for arrow-key pickers; falls back to a numbered menu without it).
@@ -231,11 +233,150 @@ APPLESCRIPT
 claude_cmd() {
   if [[ "${WT_NO_CLAUDE:-0}" == "1" ]]; then
     echo ""
-  elif [[ -n "$WT_CLAUDE_ARGS" ]]; then
-    echo "claude $WT_CLAUDE_ARGS"
-  else
-    echo "claude"
+    return
   fi
+  local cmd="claude"
+  if [[ -n "$WT_CLAUDE_ARGS" ]]; then
+    cmd="$cmd $WT_CLAUDE_ARGS"
+  fi
+  local settings
+  if settings=$(tab_title_settings); then
+    cmd="$cmd --settings $(printf '%q' "$settings")"
+  fi
+  echo "$cmd"
+}
+
+# Hooks that put a worktree's pull request number in its iTerm2 tab title,
+# written to a settings file passed to `claude --settings` so nothing has to be
+# added to the user's own Claude Code configuration. They call back into this
+# script (see cmd_tab_title). Prints the file's path, or fails when titles are
+# turned off or the file cannot be written.
+tab_title_settings() {
+  [[ "${WT_NO_TAB_TITLE:-0}" != "1" ]] || return 1
+
+  # The hook runs from wherever claude was started, so a bare "wt" is pinned
+  # down to the copy on the PATH now.
+  local self="$WT_SELF"
+  if [[ "$self" != /* ]]; then
+    self=$(command -v "$self" 2>/dev/null) || return 1
+  fi
+
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/wt"
+  local file="$dir/claude-tab-title.json"
+  mkdir -p "$dir" 2>/dev/null || return 1
+
+  local hook; hook=$(json_escape "$(printf '%q' "$self") __tab-title")
+  cat > "$file" 2>/dev/null <<EOF || return 1
+{
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "$hook created" }] }
+    ],
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "$hook idle" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "$hook idle" }] }
+    ]
+  }
+}
+EOF
+  echo "$file"
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+# The terminal the hook's claude is drawing on. Hooks get a pipe for stdin and
+# stdout, but they are still in claude's process tree, and the first ancestor
+# with a controlling terminal is the tab.
+hook_tty() {
+  local pid=$$ tty
+  while [[ -n "$pid" && "$pid" != 0 && "$pid" != 1 ]]; do
+    tty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+    if [[ -n "$tty" && "$tty" != "??" ]]; then
+      echo "/dev/$tty"
+      return 0
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+  done
+  return 1
+}
+
+# `wt __tab-title created|idle`, run by the hooks from tab_title_settings with
+# the hook's JSON on stdin.
+#
+# Claude Code sets the tab title itself (its topic, and a spinner while it
+# works), and iTerm2 has no way to pin a title against that - the last escape
+# sequence wins. So the PR title is re-asserted whenever claude goes idle, a
+# moment after it has drawn its own: it shows between turns and gives way to
+# the spinner during one.
+#
+# The number is kept in the worktree's own git directory, which goes when the
+# worktree does. A `gh pr create` looks it up straight away; otherwise it is
+# asked of GitHub at most every ten minutes, which also catches a PR opened
+# from the web, or one that existed before the tab did. Everything slow runs
+# detached, so claude never waits on the network for a title.
+cmd_tab_title() {
+  local event="${1:-idle}"
+  local payload; payload=$(cat)
+
+  local gitdir; gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) || return 0
+  local tty; tty=$(hook_tty) || return 0
+  [[ -w "$tty" ]] || return 0
+
+  local cache="$gitdir/wt-pr" checked="$gitdir/wt-pr-checked"
+  local pr=""
+  if [[ -f "$cache" ]]; then
+    pr=$(cat "$cache" 2>/dev/null || true)
+  fi
+
+  local lookup=0
+  if [[ "$event" == "created" ]]; then
+    [[ "$payload" == *"gh pr create"* ]] || return 0
+    lookup=1
+  elif [[ -z "$pr" && "${WT_NO_PR:-0}" != "1" ]] \
+       && [[ -z "$(find "$checked" -mmin -10 2>/dev/null)" ]]; then
+    lookup=1
+  fi
+  if (( lookup )) && ! command -v gh >/dev/null 2>&1; then
+    lookup=0
+  fi
+  # With nothing cached and nothing to look up, there is still one case worth
+  # waiting for: a `gh pr create` at the very end of this turn, whose lookup
+  # may not have finished by the time claude goes idle.
+  local wait_for_cache=0
+  if [[ -z "$pr" && "$lookup" == 0 ]]; then
+    [[ "$event" == "idle" && -n "$(find "$checked" -mmin -1 2>/dev/null)" ]] || return 0
+    wait_for_cache=1
+  fi
+
+  (
+    if (( lookup )); then
+      touch "$checked" 2>/dev/null || true
+      found=$(gh pr view --json number -q .number 2>/dev/null || true)
+      if [[ "$found" =~ ^[0-9]+$ ]]; then
+        pr="$found"
+        printf '%s\n' "$pr" > "$cache" 2>/dev/null || true
+      fi
+    fi
+    [[ "$event" == "idle" ]] || exit 0
+    sleep 1
+    tries=0
+    while (( wait_for_cache && tries < 8 )) && [[ -z "$pr" ]]; do
+      pr=$(cat "$cache" 2>/dev/null || true)
+      [[ -n "$pr" ]] || sleep 1
+      tries=$((tries + 1))
+    done
+    if [[ -n "$pr" ]]; then
+      printf '\033]1;PR #%s\007' "$pr" > "$tty" 2>/dev/null || true
+    fi
+  ) </dev/null >/dev/null 2>&1 &
+  return 0
 }
 
 # Print the URL of the issue a branch is named after ("1234-some-title" ->
@@ -1173,6 +1314,7 @@ Env vars:
   WT_NO_PR         Set to "1" to skip pull request lookups in the menus
   NO_COLOR         Set to anything to turn off colour in the pickers
   WT_KEEP_TABS     Set to "1" to leave a removed worktree's iTerm2 tabs open
+  WT_NO_TAB_TITLE  Set to "1" to keep "PR #<n>" out of the tab title
 EOF
 }
 
@@ -1184,6 +1326,7 @@ case "${1:-}" in
   open) shift; cmd_open "$@" ;;
   rm)   shift; cmd_rm "$@" ;;
   __preview) shift; cmd_preview "$@" ;;
+  __tab-title) shift; cmd_tab_title "$@" ;;
   -h|--help|help|"") usage ;;
   *) die "unknown command '$1' (see 'wt help')" ;;
 esac

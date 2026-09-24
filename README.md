@@ -216,6 +216,7 @@ All optional, all environment variables.
 | `WT_NO_PR` | unset | Set to `1` to skip pull request lookups in the `wt list` / `wt rm` pickers. |
 | `NO_COLOR` | unset | Set to anything to turn off colour in the pickers. |
 | `WT_KEEP_TABS` | unset | Set to `1` to leave a removed worktree's iTerm2 tabs open. |
+| `WT_NO_TAB_TITLE` | unset | Set to `1` to keep `PR #<n>` out of the tab title. |
 
 ### The start prompt
 
@@ -236,6 +237,23 @@ Two deliberate limits:
 - **Only issue-named branches.** The issue number is read off the front of the
   branch name and the URL looked up with `gh`. A branch with no leading number
   gets nothing.
+
+### The pull request in the tab title
+
+Once a worktree's branch has a pull request, the tab `wt` opened for it is
+titled `PR #2034` between Claude's turns, so you can tell a row of tabs apart
+at a glance. During a turn Claude's own title (its topic and spinner) shows as
+usual; the PR title comes back when the turn ends.
+
+It works through hooks that `wt` passes to the `claude` it starts, via
+`claude --settings ~/.local/state/wt/claude-tab-title.json`, so your own Claude
+Code settings are left alone. A `gh pr create` inside the session is picked up
+straight away. A PR opened any other way, from the web or before the tab
+existed, is found by asking GitHub at most every ten minutes until there is
+one. The number is kept in the worktree's git directory and goes with it.
+
+Only a `claude` that `wt` started gets this. It needs `gh`, and it does nothing
+when `WT_NO_PR` or `WT_NO_TAB_TITLE` is set.
 
 ## Development
 
