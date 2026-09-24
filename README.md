@@ -175,7 +175,11 @@ The quickest way to clear out finished work is therefore `wt rm`, type
 `merged`, then <kbd>Tab</kbd> through what's left and confirm.
 
 After the selection it lists exactly what it will remove and asks once to
-confirm, then asks per worktree whether to delete the local branch too.
+confirm, then asks per worktree whether to delete the local branch too. When
+that's done it drops you back into the picker with what's left, so you can keep
+clearing without re-running the command; <kbd>Esc</kbd> (or a blank answer in
+the numbered list) is what ends it. Declining the confirmation also returns to
+the picker rather than quitting.
 
 Three safety behaviours, since removal is forced underneath:
 

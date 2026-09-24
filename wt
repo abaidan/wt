@@ -1024,7 +1024,31 @@ cmd_rm() {
     return
   fi
 
-  # No argument: offer a numbered list to pick from.
+  # No argument: offer the picker, and come back to it after each removal so a
+  # handful of worktrees can be cleared out one decision at a time. Only
+  # cancelling the picker - or running out of worktrees - ends the session.
+  if [[ -z "$(list_worktrees "$root" 0)" ]]; then
+    die "no linked worktrees for this repo (the main working tree is not removable)"
+  fi
+  local first=1
+  while rm_menu_round "$root" "$first"; do
+    first=0
+    if [[ -z "$(list_worktrees "$root" 0)" ]]; then
+      echo
+      echo "No linked worktrees left."
+      return
+    fi
+    echo
+  done
+}
+
+# One pass of the `wt rm` picker: pick, confirm, remove. Returns non-zero when
+# the user cancels the picker, which is what ends the loop in cmd_rm; declining
+# the confirmation only returns to the list. Pull requests are looked up on the
+# first pass alone: removing worktrees only ever shrinks the set of branches,
+# so the index already holds every one a later pass can show.
+rm_menu_round() {
+  local root="$1" first="$2"
   local -a paths=() branches=()
   local path branch
   while IFS=$'\t' read -r path branch; do
@@ -1033,10 +1057,11 @@ cmd_rm() {
     branches[${#branches[@]}]="$branch"
   done < <(list_worktrees "$root" 0)
 
-  (( ${#paths[@]} > 0 )) \
-    || die "no linked worktrees for this repo (the main working tree is not removable)"
+  (( ${#paths[@]} > 0 )) || return 1
 
-  pr_index_load "$root" ${branches[@]+"${branches[@]}"}
+  if [[ "$first" == "1" ]]; then
+    pr_index_load "$root" ${branches[@]+"${branches[@]}"}
+  fi
   menu_init "$root" ${branches[@]+"${branches[@]}"}
 
   local here; here=$(git rev-parse --show-toplevel 2>/dev/null || true)
@@ -1059,10 +1084,10 @@ cmd_rm() {
     header="Worktrees for $(repo_name)   (type \"merged\" for landed work only)"
     sel=$(printf '%s' "$menu" | fzf_pick_worktrees \
       "$header"$'\n'"tab to mark several, enter to confirm, esc to cancel" \
-      --multi 'remove > ') || { echo "Cancelled."; return; }
+      --multi 'remove > ') || { echo "Cancelled."; return 1; }
     if [[ -z "$sel" ]]; then
       echo "Cancelled."
-      return
+      return 1
     fi
     while read -r i; do
       [[ -n "$i" ]] || continue
@@ -1075,7 +1100,7 @@ cmd_rm() {
     read -r -p "Remove which? (e.g. '1 3', 'all', blank to cancel): " reply
     if [[ -z "${reply//[[:space:]]/}" ]]; then
       echo "Cancelled."
-      return
+      return 1
     fi
     if [[ "$reply" == "all" ]]; then
       chosen=("${!paths[@]}")
@@ -1091,7 +1116,7 @@ cmd_rm() {
     fi
   fi
 
-  (( ${#chosen[@]} > 0 )) || { echo "Cancelled."; return; }
+  (( ${#chosen[@]} > 0 )) || { echo "Cancelled."; return 1; }
 
   echo
   echo "About to remove:"
@@ -1107,14 +1132,15 @@ cmd_rm() {
   local yn
   read -r -p "Proceed? [y/N] " yn || yn="n"
   if [[ ! "$yn" =~ ^[Yy]$ ]]; then
-    echo "Cancelled."
-    return
+    echo "Nothing removed."
+    return 0
   fi
 
   for i in "${chosen[@]}"; do
     echo
     remove_one_worktree "${paths[$i]}" "${branches[$i]}"
   done
+  return 0
 }
 
 usage() {
