@@ -12,7 +12,9 @@
 #   WT_INSTALL_DIR   Where to install (default: ~/bin)
 #
 # Exits non-zero if the script fails `bash -n` or shellcheck, so a broken
-# `wt` never reaches the PATH.
+# `wt` never reaches the PATH. The installed copy has its WT_VERSION stamped
+# with `git describe` of this checkout (e.g. v0.2.0, or v0.2.0-3-gabc1234-dirty
+# for unreleased work), which `wt --version` prints.
 
 set -euo pipefail
 
@@ -60,10 +62,22 @@ else
   echo "==> shellcheck not installed, skipping (brew install shellcheck)"
 fi
 
+# --- stamp ----------------------------------------------------------------
+
+# What gets installed is a copy of the source with its version filled in, so
+# the comparisons below are made against that copy rather than the source.
+version=$(git -C "$SRC_DIR" describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo dev)
+STAMPED="$(mktemp "${TMPDIR:-/tmp}/wt.XXXXXX")"
+trap 'rm -f "$STAMPED"' EXIT
+sed "s/^WT_VERSION=\"dev\"$/WT_VERSION=\"$version\"/" "$SRC" > "$STAMPED"
+grep -q "^WT_VERSION=\"$version\"$" "$STAMPED" \
+  || { echo "build: could not stamp the version into $SRC" >&2; exit 1; }
+echo "==> Version $version"
+
 # --- compare --------------------------------------------------------------
 
 if [[ "$mode" == "diff" ]]; then
-  if [[ -f "$DEST" ]] && diff -u "$DEST" "$SRC"; then
+  if [[ -f "$DEST" ]] && diff -u "$DEST" "$STAMPED"; then
     echo "==> No changes: $DEST matches source"
   fi
   exit 0
@@ -74,7 +88,7 @@ if [[ "$mode" == "check" ]]; then
   exit 0
 fi
 
-if [[ -f "$DEST" ]] && cmp -s "$SRC" "$DEST" && (( force == 0 )); then
+if [[ -f "$DEST" ]] && cmp -s "$STAMPED" "$DEST" && (( force == 0 )); then
   echo "==> Already up to date: $DEST"
   exit 0
 fi
@@ -82,8 +96,8 @@ fi
 # --- install --------------------------------------------------------------
 
 mkdir -p "$INSTALL_DIR"
-install -m 755 "$SRC" "$DEST"
-echo "==> Installed $SRC -> $DEST"
+install -m 755 "$STAMPED" "$DEST"
+echo "==> Installed $SRC ($version) -> $DEST"
 
 # Warn if the copy that will actually run is not the one just installed.
 resolved="$(command -v wt 2>/dev/null || true)"

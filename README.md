@@ -59,6 +59,9 @@ export PATH="$HOME/bin:$PATH"
 
 Install somewhere else with `WT_INSTALL_DIR=/usr/local/bin ./build`.
 
+To install a particular release rather than the latest commit, check out its
+tag first — `git checkout v0.1.0 && ./build` — and `wt --version` will say so.
+
 ## Commands
 
 ### `wt new` — create a worktree
@@ -276,7 +279,27 @@ The source of truth is `wt` in this repo; `~/bin/wt` is an installed copy.
 ```
 
 `build` runs `bash -n` and then `shellcheck --severity=warning`, and refuses to
-install if either fails — a broken `wt` never reaches your `PATH`.
+install if either fails — a broken `wt` never reaches your `PATH`. The
+installed copy is stamped with `git describe` of the checkout, so `wt --version`
+prints `v0.2.0` for a release and something like `v0.2.0-3-gabc1234-dirty` for
+work in between. Run straight from the repo, it prints `dev`.
+
+### Releases
+
+Versions are git tags of the form `vMAJOR.MINOR.PATCH`, cut with `./release`:
+
+```sh
+./release              # next patch: v0.1.0 -> v0.1.1
+./release minor        # next minor: v0.1.3 -> v0.2.0
+./release major        # next major: v0.4.1 -> v1.0.0
+./release 1.2.3        # exactly v1.2.3
+./release --dry-run    # show what would be tagged, change nothing
+./release --push       # also push the new tag to origin
+```
+
+It tags the current commit of `main`, and refuses unless the tree is clean,
+`main` is level with `origin/main`, and `./build --check` passes. The tag is
+annotated, and its message lists the commits since the previous release.
 
 ## Known rough edges
 

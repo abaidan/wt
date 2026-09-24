@@ -15,6 +15,7 @@
 #   wt list --plain           Print the plain `git worktree list` output
 #   wt open [branch]          Same as `wt list`; with a branch, opens it directly
 #   wt rm [branch]            Remove a worktree; with no argument, pick from a list
+#   wt --version              Print the installed version
 #
 # Env vars:
 #   WT_ROOT          Where worktrees are stored (default: ~/worktrees)
@@ -44,6 +45,11 @@
 # and `fzf` (for arrow-key pickers; falls back to a numbered menu without it).
 
 set -euo pipefail
+
+# Replaced by `./Build` at install time with `git describe` of the checkout it
+# was installed from, so a copy on the PATH can say which release it is. Run
+# straight from the repo, it stays "dev".
+WT_VERSION="dev"
 
 WT_ROOT="${WT_ROOT:-$HOME/worktrees}"
 
@@ -1355,6 +1361,7 @@ Usage:
                           worktrees whose pull request has landed)
   wt open [branch]        Same as "wt list"; with a branch, opens it directly
   wt rm [branch]          Remove a worktree; with no argument, pick from a list
+  wt --version            Print the installed version
 
 Env vars:
   WT_ROOT          Where worktrees are stored (default: ~/worktrees)
@@ -1385,6 +1392,7 @@ case "${1:-}" in
   rm)   shift; cmd_rm "$@" ;;
   __preview) shift; cmd_preview "$@" ;;
   __tab-title) shift; cmd_tab_title "$@" ;;
+  -V|--version|version) echo "wt $WT_VERSION" ;;
   -h|--help|help|"") usage ;;
   *) die "unknown command '$1' (see 'wt help')" ;;
 esac

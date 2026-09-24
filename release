@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+#
+# release - tag a new version of `wt`
+#
+# Usage:
+#   ./release              Tag the next patch version (v0.1.0 -> v0.1.1)
+#   ./release minor        Tag the next minor version (v0.1.3 -> v0.2.0)
+#   ./release major        Tag the next major version (v0.4.1 -> v1.0.0)
+#   ./release 1.2.3        Tag exactly v1.2.3
+#   ./release ... --push   Push the new tag to origin as well
+#   ./release ... --dry-run
+#                          Say what would be tagged, and change nothing
+#
+# Tags are annotated, named vMAJOR.MINOR.PATCH, and placed on the current
+# commit of the default branch, which must be clean, validated by
+# `./build --check`, and level with origin - a tag on a commit nobody else
+# has would point at nothing once pushed. The tag message lists the commits
+# since the previous release. With no release yet, "patch" starts at v0.1.0.
+
+set -euo pipefail
+
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+die() { echo "release: $*" >&2; exit 1; }
+
+bump="patch" push=0 dry_run=0
+for arg in "$@"; do
+  case "$arg" in
+    patch|minor|major) bump="$arg" ;;
+    v[0-9]*.[0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) bump="${arg#v}" ;;
+    --push) push=1 ;;
+    --dry-run|-n) dry_run=1 ;;
+    -h|--help)
+      sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *) die "unknown argument '$arg' (try --help)" ;;
+  esac
+done
+
+cd "$SRC_DIR"
+
+# --- preconditions ----------------------------------------------------------
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null) || die "HEAD is detached"
+default=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@') \
+  || default=main
+[[ "$branch" == "$default" ]] || die "on '$branch'; releases are tagged on '$default'"
+
+[[ -z "$(git status --porcelain)" ]] || die "working tree has uncommitted changes"
+
+echo "==> Fetching origin"
+git fetch --quiet --tags origin "$default"
+[[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/$default")" ]] \
+  || die "'$default' is not level with origin/$default; push or pull first"
+
+"$SRC_DIR/build" --check >/dev/null || die "./build --check failed; not tagging"
+
+# --- next version -----------------------------------------------------------
+
+last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)
+
+if [[ "$bump" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  next="v$bump"
+elif [[ -z "$last" ]]; then
+  case "$bump" in
+    major) next="v1.0.0" ;;
+    *)     next="v0.1.0" ;;
+  esac
+else
+  IFS=. read -r major minor patch <<< "${last#v}"
+  case "$bump" in
+    major) next="v$((major + 1)).0.0" ;;
+    minor) next="v$major.$((minor + 1)).0" ;;
+    patch) next="v$major.$minor.$((patch + 1))" ;;
+  esac
+fi
+
+git rev-parse -q --verify "refs/tags/$next" >/dev/null && die "$next already exists"
+if [[ -n "$last" ]]; then
+  newest=$(printf '%s\n%s\n' "$last" "$next" | sort -V | tail -n 1)
+  [[ "$newest" == "$next" ]] || die "$next is not newer than $last"
+  [[ -n "$(git rev-list "$last..HEAD")" ]] || die "nothing to release since $last"
+fi
+
+# --- tag --------------------------------------------------------------------
+
+range="${last:+$last..}HEAD"
+message="wt $next"$'\n\n'"$(git log --no-merges --format='- %s' "$range")"
+
+echo "==> ${last:-No previous release} -> $next at $(git rev-parse --short HEAD)"
+echo
+echo "$message" | sed 's/^/    /'
+echo
+
+if (( dry_run )); then
+  echo "==> Dry run; nothing tagged"
+  exit 0
+fi
+
+git tag -a "$next" -m "$message"
+echo "==> Tagged $next"
+
+if (( push )); then
+  git push --quiet origin "refs/tags/$next"
+  echo "==> Pushed $next to origin"
+else
+  echo "    Push it with: git push origin $next"
+fi
