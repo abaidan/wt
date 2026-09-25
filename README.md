@@ -178,19 +178,17 @@ wt rm 1234-some-branch  # remove that one directly
 
 The picker carries the same pull request labels as `wt list`, which is usually
 what you want to know before deleting anything: a green `[✓ PR #1201 merged]`
-is safe to clear away, a `[PR #1240 open, checks failing]` probably isn't. The
-labels are repeated in the confirmation list, and `wt rm <branch>` prints the
-branch's pull request before it removes anything.
+is safe to clear away, a `[PR #1240 open, checks failing]` probably isn't.
+`wt rm <branch>` prints the branch's pull request before it removes anything.
 
 The quickest way to clear out finished work is therefore `wt rm`, type
-`merged`, then <kbd>Tab</kbd> through what's left and confirm.
+`merged`, then <kbd>Tab</kbd> through what's left and press <kbd>Enter</kbd>.
 
-After the selection it lists exactly what it will remove and asks once to
-confirm, then asks per worktree whether to delete the local branch too. When
-that's done it drops you back into the picker with what's left, so you can keep
-clearing without re-running the command; <kbd>Esc</kbd> (or a blank answer in
-the numbered list) is what ends it. Declining the confirmation also returns to
-the picker rather than quitting.
+Selecting is the decision: there is no extra "Proceed?" step, so what you pick
+is removed straight away. It then asks per worktree whether to delete the local
+branch too. When that's done it drops you back into the picker with what's
+left, so you can keep clearing without re-running the command; <kbd>Esc</kbd>
+(or a blank answer in the numbered list) is what ends it.
 
 Three safety behaviours, since removal is forced underneath:
 

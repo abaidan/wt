@@ -1250,11 +1250,10 @@ cmd_rm() {
   done
 }
 
-# One pass of the `wt rm` picker: pick, confirm, remove. Returns non-zero when
-# the user cancels the picker, which is what ends the loop in cmd_rm; declining
-# the confirmation only returns to the list. Pull requests are looked up on the
-# first pass alone: removing worktrees only ever shrinks the set of branches,
-# so the index already holds every one a later pass can show.
+# One pass of the `wt rm` picker: pick, remove. Returns non-zero when the user
+# cancels the picker, which is what ends the loop in cmd_rm. Pull requests are
+# looked up on the first pass alone: removing worktrees only ever shrinks the
+# set of branches, so the index already holds every one a later pass can show.
 rm_menu_round() {
   local root="$1" first="$2"
   local -a paths=() branches=()
@@ -1326,24 +1325,8 @@ rm_menu_round() {
 
   (( ${#chosen[@]} > 0 )) || { echo "Cancelled."; return 1; }
 
-  echo
-  echo "About to remove:"
-  local mark
-  for i in "${chosen[@]}"; do
-    mark=$(pr_mark "$(pr_label_for_branch "${branches[$i]}")")
-    if [[ -n "$mark" ]]; then
-      mark="  $mark"
-    fi
-    printf '  - %s  (%s)%s\n' "${branches[$i]}" "${paths[$i]}" "$mark"
-  done
-
-  local yn
-  read -r -p "Proceed? [y/N] " yn || yn="n"
-  if [[ ! "$yn" =~ ^[Yy]$ ]]; then
-    echo "Nothing removed."
-    return 0
-  fi
-
+  # Picking in a picker that only removes is the decision; asking again on top
+  # of it is noise. Dirty worktrees still get their own prompt below.
   for i in "${chosen[@]}"; do
     echo
     remove_one_worktree "${paths[$i]}" "${branches[$i]}"
