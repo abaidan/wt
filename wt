@@ -23,7 +23,7 @@
 #   WT_NO_CLAUDE     If set to "1", don't auto-run `claude` in the new tab
 #   WT_CLAUDE_ARGS   Args passed to claude (default: --permission-mode auto;
 #                    set to empty to launch plain `claude`)
-#   WT_ISSUE_LIMIT   How many issues to show in the picker (default: 30)
+#   WT_ISSUE_LIMIT   Most open issues the picker fetches (default: 1000)
 #   WT_PROMPT_TEMPLATE
 #                    Prompt typed into claude (left unsent) in a newly created
 #                    worktree whose branch is named after an issue; "{url}" is
@@ -481,7 +481,10 @@ pick_issue_branch() {
   local root="$1" only_mine="$2"
   require_gh
 
-  local -a gh_args=(issue list --state open --limit "${WT_ISSUE_LIMIT:-30}")
+  # High enough to take in every open issue on most repos, so that typing in
+  # fzf searches all of them rather than only the newest page; gh pages
+  # through the API 100 at a time to get there.
+  local -a gh_args=(issue list --state open --limit "${WT_ISSUE_LIMIT:-1000}")
   if [[ "$only_mine" == "1" ]]; then
     gh_args[${#gh_args[@]}]="--assignee"
     gh_args[${#gh_args[@]}]="@me"
@@ -523,20 +526,26 @@ pick_issue_branch() {
   # The mark sits between the number and the title, never after the title: fzf
   # gives the list only about half the width next to the preview, so anything
   # past a padded title is cut off the edge of the screen in most terminals.
-  local i n shown mark menu=""
+  #
+  # The issue numbers that have a worktree are collected once, up front, as
+  # " 12 34 ": with hundreds of issues, a grep per line costs seconds.
+  # Same rule as find_worktree_for_issue: "<n>" or "<n>-anything", so a
+  # branch named after an issue whose title slugs to nothing still counts.
+  local have_wt=" "
+  have_wt+=$(printf '%s\n' "$existing" | sed -nE 's/^([0-9]+)(-.*)?$/\1/p' | tr '\n' ' ')
+  local i n shown mark line menu=""
   for i in "${!numbers[@]}"; do
     n="${numbers[$i]}"
     mark=""
-    # Same rule as find_worktree_for_issue: "<n>" or "<n>-anything", so a
-    # branch named after an issue whose title slugs to nothing still counts.
-    if printf '%s\n' "$existing" | grep -qE "^${n}(-|\$)"; then
+    if [[ "$have_wt" == *" $n "* ]]; then
       mark="[worktree]"
     fi
     shown="${titles[$i]}"
     if (( ${#shown} > 64 )); then
       shown="${shown:0:61}..."
     fi
-    menu="$menu$(printf '%s\t#%-6s %-10s  %s' "$n" "$n" "$mark" "$shown")"$'\n'
+    printf -v line '%s\t#%-6s %-10s  %s' "$n" "$n" "$mark" "$shown"
+    menu+="$line"$'\n'
   done
 
   local reply
@@ -546,15 +555,21 @@ pick_issue_branch() {
       --delimiter=$'\t' --with-nth=2.. \
       --height=90% --border --reverse --no-multi \
       --prompt='issue > ' \
-      --header="$label   (type to filter, enter to pick, esc to cancel)" \
+      --header="$label: ${#numbers[@]} open   (type to filter, enter to pick, esc to cancel)" \
       --preview="cd $(printf '%q' "$root") && gh issue view {1}" \
       --preview-window='right:48%:wrap') || return 0
     [[ -n "$sel" ]] || return 0
     reply=$(printf '%s' "$sel" | cut -f1)
   else
     echo >&2
+    # Without fzf there is no filtering, so print only the newest issues
+    # rather than scroll hundreds of lines past; any number can still be typed.
+    local max_shown=50
     echo "Open issues in $label:" >&2
-    printf '%s' "$menu" | cut -f2- | sed 's/^/  /' >&2
+    printf '%s' "$menu" | head -n "$max_shown" | cut -f2- | sed 's/^/  /' >&2
+    if (( ${#numbers[@]} > max_shown )); then
+      echo "  ... and $(( ${#numbers[@]} - max_shown )) more (install fzf to search them all)" >&2
+    fi
     echo >&2
     read -r -p "Which issue? (issue number, blank to cancel): " reply
     if [[ -z "${reply//[[:space:]]/}" ]]; then
@@ -1357,7 +1372,7 @@ Env vars:
   WT_BASE_BRANCH   Base branch to branch from (default: repo's default branch)
   WT_NO_CLAUDE     Set to "1" to skip auto-running claude in the new tab
   WT_CLAUDE_ARGS   Args passed to claude (default: --permission-mode auto)
-  WT_ISSUE_LIMIT   How many issues to show in the picker (default: 30)
+  WT_ISSUE_LIMIT   Most open issues the picker fetches (default: 1000)
   WT_PROMPT_TEMPLATE
                    Prompt typed (unsent) into claude in a NEW issue worktree;
                    "{url}" becomes the issue URL. Set empty to disable.

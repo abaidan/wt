@@ -100,8 +100,10 @@ directory you deleted by hand is deregistered and recreated. A directory that's
 in the way but isn't a registered worktree is the one case that stops with an
 error, since sorting that out needs a human.
 
-You can type an issue number that isn't in the list — it's looked up on demand —
-which matters because the list is capped (see `WT_ISSUE_LIMIT`).
+The picker loads every open issue (up to `WT_ISSUE_LIMIT`), so typing in fzf
+searches all of them, not just the newest. Without fzf, the numbered menu prints
+only the newest 50. You can still type any issue number, listed or not, and it's
+looked up on demand.
 
 ### `wt list` — reopen a worktree
 
@@ -220,7 +222,7 @@ All optional, all environment variables.
 | `WT_NO_CLAUDE` | unset | Set to `1` to open the tab and `cd` there without launching Claude. |
 | `WT_PROMPT_TEMPLATE` | `Work on this GitHub issue: {url}` | Prompt typed into Claude in a newly created issue worktree; `{url}` is replaced with the issue URL. Set empty to disable. |
 | `WT_PREFILL_DELAY` | `6` | Seconds to wait for Claude to start before typing that prompt. |
-| `WT_ISSUE_LIMIT` | `30` | How many issues the picker lists. |
+| `WT_ISSUE_LIMIT` | `1000` | Most open issues the picker fetches; fzf searches all of them. |
 | `WT_NO_PULL` | unset | Set to `1` so `wt new` only fetches, leaving your local base branch where it is. |
 | `WT_NO_PR` | unset | Set to `1` to skip pull request lookups in the `wt list` / `wt rm` pickers. |
 | `NO_COLOR` | unset | Set to anything to turn off colour in the pickers. |
