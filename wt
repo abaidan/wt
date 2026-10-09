@@ -511,10 +511,12 @@ pick_issue_branch() {
     die "no open issues found for this repo"
   fi
 
-  # Branch names of worktrees that already exist, so the menu can flag issues
-  # that are already checked out somewhere.
+  # Branch and directory names of worktrees that already exist, so the menu
+  # can flag issues that are already checked out somewhere. The directory
+  # counts too: it keeps the issue's name after the branch inside it has been
+  # switched to something else.
   local existing
-  existing=$(list_worktrees "$root" 0 | cut -f2)
+  existing=$(list_worktrees "$root" 0 | awk -F'\t' '{ n = split($1, d, "/"); print $2; print d[n] }')
 
   local label
   label=$(cd "$root" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) \
@@ -728,6 +730,15 @@ cmd_new() {
     fi
   fi
 
+  # The directory is a worktree, but its branch has since been switched to
+  # something else: it is still where this issue's work lives, so open it.
+  if [[ -d "$wt_path" ]] && worktree_is_registered "$root" "$wt_path"; then
+    local on; on=$(list_worktrees "$root" 0 | awk -F'\t' -v p="$wt_path" '$1 == p { print $2; exit }')
+    echo "Worktree at $(short_path "$wt_path") already exists (now on '$on'), opening it."
+    open_worktree "$root" "$wt_path" "$on"
+    return
+  fi
+
   # A directory in the way that git knows nothing about needs a human.
   [[ -e "$wt_path" ]] \
     && die "path already exists and is not a worktree for '$branch': $wt_path"
@@ -827,14 +838,16 @@ cmd_list() {
   pick_worktree_and_open "$root"
 }
 
-# Print "path<TAB>branch" for a worktree whose branch is named after issue $2
-# ("1234" or "1234-anything"), or nothing. The issue picker flags an issue as
-# already checked out by this same leading-number rule, so the two agree even
-# once the issue title, and with it the slug, has been edited.
+# Print "path<TAB>branch" for a worktree whose branch or directory is named
+# after issue $2 ("1234" or "1234-anything"), or nothing. The issue picker
+# flags an issue as already checked out by this same leading-number rule, so
+# the two agree even once the issue title, and with it the slug, has been
+# edited - or the branch in the worktree has been switched to another name.
 find_worktree_for_issue() {
   local root="$1" num="$2"
   list_worktrees "$root" 0 | awk -F'\t' -v n="$num" '
-    $2 == n || index($2, n "-") == 1 { print; exit }
+    { k = split($1, d, "/"); dir = d[k] }
+    $2 == n || index($2, n "-") == 1 || dir == n || index(dir, n "-") == 1 { print; exit }
   '
 }
 
@@ -1050,8 +1063,10 @@ worktree_location() {
 # Format one worktree as a menu line:
 # "<index><TAB><path><TAB><branch><TAB><marks><TAB><location>".
 # fzf displays fields 3.. and hands back the index. Matching is limited to the
-# branch name and the marks, so a long shared path prefix cannot match
-# everything, while typing "merged" narrows the list to what is safe to remove.
+# branch name, the marks and the location hint, so a long shared path prefix
+# cannot match everything, while typing "merged" narrows the list to what is
+# safe to remove - and typing an issue number still finds a worktree whose
+# branch has been switched away from the name its directory carries.
 worktree_menu_line() {
   local idx="$1" wt_path="$2" branch="$3" here="$4" current_label="${5:-current}"
   local marks="" mark
@@ -1121,7 +1136,7 @@ cmd_preview() {
 fzf_pick_worktrees() {
   # The pull request is fetched per highlighted row rather than up front, so
   # the round trip only happens for worktrees the user actually stops on.
-  fzf --delimiter=$'\t' --with-nth=3.. --nth=1,2 --ansi \
+  fzf --delimiter=$'\t' --with-nth=3.. --nth=1,2,3 --ansi \
     --height=90% --border --reverse "$2" \
     --prompt="$3" --header="$1" \
     --preview="$(printf '%q' "$WT_SELF") __preview {2}" \
