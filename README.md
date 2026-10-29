@@ -145,7 +145,7 @@ export WT_JIRA_PROJECT=SRE            # optional, see below
 security add-generic-password -s wt-jira -a you@example.com -w   # prompts for the token
 ```
 
-The account is `git config user.email` unless `WT_JIRA_EMAIL` says otherwise.
+The account is `git config --global user.email` — the global one, not a repo's own — unless `WT_JIRA_EMAIL` says otherwise.
 `WT_JIRA_TOKEN` works too, in place of the keychain. The token is handed to
 curl through a pipe, so it never appears in a process listing.
 
@@ -291,7 +291,7 @@ All optional, all environment variables.
 | `WT_NO_TAB_TITLE` | unset | Set to `1` to keep `PR #<n>` out of the tab title. |
 | `WT_NEW_TAB` | unset | Set to `1` to always open a new tab when reopening a worktree, even if one is already open in it. |
 | `WT_JIRA_URL` | unset | Your Jira Cloud site, e.g. `https://example.atlassian.net`. Turns the Jira support on. |
-| `WT_JIRA_EMAIL` | `git config user.email` | The Atlassian account to sign in as. |
+| `WT_JIRA_EMAIL` | `git config --global user.email` | The Atlassian account to sign in as. |
 | `WT_JIRA_TOKEN` | the keychain's `wt-jira` entry | Atlassian API token. |
 | `WT_JIRA_PROJECT` | unset | Project the Jira picker lists open tickets of. |
 | `WT_JIRA_JQL` | unset | JQL filter replacing the Jira picker's default (no `ORDER BY`). |

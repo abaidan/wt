@@ -55,7 +55,8 @@
 #                    worktree, even if one is already open in it
 #   WT_JIRA_URL      Jira Cloud site, e.g. https://example.atlassian.net;
 #                    setting it is what turns the Jira support on
-#   WT_JIRA_EMAIL    Atlassian account email (default: git config user.email)
+#   WT_JIRA_EMAIL    Atlassian account email (default: the global, not the
+#                    repo's, git config user.email)
 #   WT_JIRA_TOKEN    Atlassian API token (default: read from the login
 #                    keychain, service "wt-jira", account WT_JIRA_EMAIL)
 #   WT_JIRA_PROJECT  Project key the Jira picker lists tickets from
@@ -675,9 +676,12 @@ require_jira() {
   command -v jq >/dev/null 2>&1 || die "jq not found; Jira support needs it ('brew install jq')"
 }
 
+# The account Jira requests are made as. Its fallback is the global git email,
+# not the repo's: a repo that commits under a personal address must not
+# change which Jira account `wt` signs in as.
 jira_email() {
   local email="${WT_JIRA_EMAIL:-}"
-  [[ -n "$email" ]] || email=$(git config user.email 2>/dev/null || true)
+  [[ -n "$email" ]] || email=$(git config --global user.email 2>/dev/null || true)
   printf '%s' "$email"
 }
 
@@ -728,7 +732,7 @@ or set WT_JIRA_TOKEN."
   resp="${resp%$'\n'*}"
   if [[ "$code" != 2* ]]; then
     [[ "$code" != 401 ]] \
-      || die "Jira rejected the credentials for $email (HTTP 401); check WT_JIRA_EMAIL and the API token"
+      || die "Jira rejected the credentials for $email (HTTP 401); check WT_JIRA_EMAIL and the API token (an API token, not a password: about 190 characters, starting ATATT)"
     local msg
     msg=$(printf '%s' "$resp" \
             | jq -r '[.errorMessages[]?, ((.errors // {}) | .[])] | join("; ")' 2>/dev/null) \
@@ -736,6 +740,14 @@ or set WT_JIRA_TOKEN."
     die "Jira request failed (HTTP $code)${msg:+: $msg}"
   fi
   printf '%s' "$resp"
+}
+
+# Make sure Jira accepts the credentials before relying on them. Rejected
+# ones only fail loudly where an account is required: a search instead runs
+# as an anonymous visitor and comes back empty, and a ticket lookup says the
+# ticket does not exist - either of which sends you looking in the wrong place.
+jira_check_login() {
+  jira_api GET /rest/api/3/myself >/dev/null || exit 1
 }
 
 # The JQL behind the Jira picker: WT_JIRA_JQL, or the open tickets of
@@ -1063,6 +1075,7 @@ cmd_new() {
   local id="" title="" url="" template="" what="" branch picked
   if [[ "$source" == "jira" ]]; then
     require_jira
+    jira_check_login
     if [[ -z "$arg" ]]; then
       picked=$(pick_jira_ticket "$root" "$only_mine") || exit 1
       if [[ -z "$picked" ]]; then
@@ -1828,7 +1841,7 @@ Env vars:
 
 Jira (Cloud), needs curl and jq:
   WT_JIRA_URL      Your site, e.g. https://example.atlassian.net (required)
-  WT_JIRA_EMAIL    Atlassian account (default: git config user.email)
+  WT_JIRA_EMAIL    Atlassian account (default: git config --global user.email)
   WT_JIRA_TOKEN    API token; better kept in the keychain instead:
                      security add-generic-password -s wt-jira -a <email> -w
   WT_JIRA_PROJECT  Project the picker lists open tickets of (without it,
