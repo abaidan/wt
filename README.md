@@ -3,9 +3,10 @@
 A git worktree helper for working on several branches at once without stashing,
 rebuilding, or losing your place.
 
-`wt` creates a worktree, names its branch after a GitHub issue, stores it in one
-central folder, and opens it in a new iTerm2 tab with Claude Code already
-running — seeded with a link to the issue. Picking, reopening and removing
+`wt` creates a worktree, names its branch after a GitHub issue or a Jira ticket
+(or checks out a pull request's branch), stores it in one central folder, and
+opens it in a new iTerm2 tab with Claude Code already running — seeded with a
+link to the issue, ticket or pull request. Picking, reopening and removing
 worktrees all go through an `fzf` picker, which shows each worktree's pull
 request and where it stands — merged ones flagged green, so finished work is
 easy to clear away.
@@ -38,7 +39,8 @@ issue link waiting in the prompt box for you to send.
 | **git** | Required, with `git worktree` support. Developed against 2.54. |
 | **bash** | Required. Works on macOS's system bash 3.2. |
 | **macOS + iTerm2** | Required for opening tabs — the tab is driven by AppleScript. |
-| **[gh](https://cli.github.com)** | Optional. Needed for the issue picker, issue-named branches, issue links, and pull request status in the `wt list` / `wt rm` pickers. Run `gh auth login` once. |
+| **[gh](https://cli.github.com)** | Optional. Needed for the issue and pull request pickers, issue-named branches, issue links, and pull request status in the `wt list` / `wt rm` pickers. Run `gh auth login` once. |
+| **curl + [jq](https://jqlang.org)** | Optional. Needed for Jira tickets. curl ships with macOS; `brew install jq`. |
 | **[fzf](https://github.com/junegunn/fzf)** | Optional. Gives the interactive pickers; without it every picker falls back to a numbered menu. |
 | **[shellcheck](https://www.shellcheck.net)** | Optional. Used by `./build` if present. |
 
@@ -70,6 +72,14 @@ tag first — `git checkout v0.1.0 && ./build` — and `wt --version` will say s
 wt new                  # pick an open issue from a list
 wt new --mine           # ...only issues assigned to you
 wt new 1234             # branch from issue #1234 directly
+wt new --pr             # pick an open pull request and check out its branch
+wt new --pr --mine      # ...only pull requests you opened
+wt new --pr 1240        # check out pull request #1240 directly
+wt new --jira           # pick an open Jira ticket
+wt new --jira --mine    # ...only tickets assigned to you
+wt new SRE-1234         # branch from Jira ticket SRE-1234 directly
+wt new <link>           # any of the above from a pasted GitHub issue or pull
+                        # request link, or a Jira /browse/ link
 wt new my-branch-name   # branch with an explicit name, no issue
 ```
 
@@ -89,7 +99,7 @@ leaves it exactly as it was. Either way the new worktree is cut from
 `origin/<base>`, so it starts current regardless. `WT_NO_PULL=1` fetches
 without touching the local branch.
 
-Issues that already have a worktree are flagged `[worktree exists]` in the
+Issues that already have a worktree are flagged `[worktree]` in the
 picker. Picking one anyway is fine — `wt new` opens the existing worktree
 instead of failing. The match is on the issue number rather than the whole
 branch name, so an issue renamed since its worktree was created still reopens
@@ -104,6 +114,55 @@ The picker loads every open issue (up to `WT_ISSUE_LIMIT`), so typing in fzf
 searches all of them, not just the newest. Without fzf, the numbered menu prints
 only the newest 50. You can still type any issue number, listed or not, and it's
 looked up on demand.
+
+#### Pull requests
+
+`wt new --pr` checks out the pull request's **own** branch rather than cutting
+a new one, so commits made there land in the pull request when pushed. The
+worktree is named after that branch, which means a pull request opened from a
+`wt new` worktree comes back to that same worktree instead of a second copy —
+and the picker flags it `[worktree]`, as for issues. A local copy of the branch
+left from earlier is fast-forwarded to the pull request first, but never moved
+if it has commits of its own.
+
+A pull request from a fork has no branch in this repo to share. It gets a local
+`pr-<number>-<branch>`, cut from the copy GitHub keeps under
+`refs/pull/<number>/head`, with no upstream: fine for reviewing and trying it
+out, but pushing back needs a remote for the fork.
+
+A pasted link to some other repo's issue or pull request is refused, rather
+than its number looked up here and an unrelated item found.
+
+#### Jira tickets
+
+Jira Cloud, through its REST API with an
+[API token](https://id.atlassian.com/manage-profile/security/api-tokens). Set
+the site, and keep the token in the login keychain rather than a shell profile:
+
+```sh
+export WT_JIRA_URL=https://example.atlassian.net
+export WT_JIRA_PROJECT=SRE            # optional, see below
+security add-generic-password -s wt-jira -a you@example.com -w   # prompts for the token
+```
+
+The account is `git config user.email` unless `WT_JIRA_EMAIL` says otherwise.
+`WT_JIRA_TOKEN` works too, in place of the keychain. The token is handed to
+curl through a pipe, so it never appears in a process listing.
+
+The branch is `<KEY>-<slugified-summary>`, e.g. `SRE-1234-add-a-retry-to-the-upload-queue`.
+The key keeps its capitals, which is how Jira spots a branch for a ticket and
+links it in the ticket's development panel. Everything else — the
+`[worktree]` flag, reopening after a rename, the start prompt — works as for
+issues.
+
+The picker lists open tickets of `WT_JIRA_PROJECT`, newest activity first, with
+`--mine` narrowing it to yours; without a project it lists only yours, since
+every open ticket on a site is no use to pick from. `WT_JIRA_JQL` replaces the
+query outright (leave out `ORDER BY`; `--mine` still applies). The preview pane
+shows the ticket's status, assignee and description.
+
+Only once `WT_JIRA_URL` is set does a bare `ABC-123` mean a ticket; before
+that it is an ordinary branch name. `wt new --jira abc-123` is never ambiguous.
 
 ### `wt list` — reopen a worktree
 
@@ -221,19 +280,26 @@ All optional, all environment variables.
 | `WT_CLAUDE_ARGS` | `--permission-mode auto` | Arguments passed to `claude`. Set empty for a plain `claude`. |
 | `WT_NO_CLAUDE` | unset | Set to `1` to open the tab and `cd` there without launching Claude. |
 | `WT_PROMPT_TEMPLATE` | `Work on this GitHub issue: {url}` | Prompt typed into Claude in a newly created issue worktree; `{url}` is replaced with the issue URL. Set empty to disable. |
+| `WT_PR_PROMPT_TEMPLATE` | `Work on this pull request: {url}` | The same, for a pull request's worktree. |
+| `WT_JIRA_PROMPT_TEMPLATE` | `Work on this Jira ticket: {url}` | The same, for a Jira ticket's worktree. |
 | `WT_PREFILL_DELAY` | `6` | Seconds to wait for Claude to start before typing that prompt. |
-| `WT_ISSUE_LIMIT` | `1000` | Most open issues the picker fetches; fzf searches all of them. |
+| `WT_ISSUE_LIMIT` | `1000` | Most open issues, pull requests or tickets a picker fetches; fzf searches all of them. |
 | `WT_NO_PULL` | unset | Set to `1` so `wt new` only fetches, leaving your local base branch where it is. |
 | `WT_NO_PR` | unset | Set to `1` to skip pull request lookups in the `wt list` / `wt rm` pickers. |
 | `NO_COLOR` | unset | Set to anything to turn off colour in the pickers. |
 | `WT_KEEP_TABS` | unset | Set to `1` to leave a removed worktree's iTerm2 tabs open. |
 | `WT_NO_TAB_TITLE` | unset | Set to `1` to keep `PR #<n>` out of the tab title. |
 | `WT_NEW_TAB` | unset | Set to `1` to always open a new tab when reopening a worktree, even if one is already open in it. |
+| `WT_JIRA_URL` | unset | Your Jira Cloud site, e.g. `https://example.atlassian.net`. Turns the Jira support on. |
+| `WT_JIRA_EMAIL` | `git config user.email` | The Atlassian account to sign in as. |
+| `WT_JIRA_TOKEN` | the keychain's `wt-jira` entry | Atlassian API token. |
+| `WT_JIRA_PROJECT` | unset | Project the Jira picker lists open tickets of. |
+| `WT_JIRA_JQL` | unset | JQL filter replacing the Jira picker's default (no `ORDER BY`). |
 
 ### The start prompt
 
-In a **newly created** worktree whose branch is named after an issue, the issue
-URL is typed into Claude's prompt box and left there — you press enter yourself,
+In a **newly created** worktree for an issue, a pull request or a Jira ticket,
+its URL is typed into Claude's prompt box and left there — you press enter yourself,
 or edit it first, or ignore it. Nothing is submitted on your behalf.
 
 It is typed rather than passed as an argument, via iTerm2's `write … newline no`,
@@ -246,9 +312,8 @@ Two deliberate limits:
 - **Only new worktrees.** Reopening through `wt list`, `wt open`, or a `wt new`
   that finds an existing worktree never prefills — that session has its own
   history and the link would just be in the way.
-- **Only issue-named branches.** The issue number is read off the front of the
-  branch name and the URL looked up with `gh`. A branch with no leading number
-  gets nothing.
+- **Only worktrees made for an issue, pull request or ticket.** A branch given
+  by name gets nothing, even one that happens to start with a number.
 
 ### The pull request in the tab title
 
@@ -309,8 +374,6 @@ annotated, and its message lists the commits since the previous release.
 - `wt new` run from *inside* a worktree nests the new worktree under the current
   branch's directory, because the repo name is taken from the current working
   tree rather than the main one.
-- A branch that merely starts with digits (`2024-cleanup`) is treated as
-  issue-named, so the start prompt may link an unrelated issue #2024.
 
 ## License
 
