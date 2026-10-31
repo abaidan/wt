@@ -332,6 +332,48 @@ one. The number is kept in the worktree's git directory and goes with it.
 Only a `claude` that `wt` started gets this. It needs `gh`, and it does nothing
 when `WT_NO_PR` or `WT_NO_TAB_TITLE` is set.
 
+## Keeping the Mac awake
+
+Not part of `wt` itself, but useful when several worktrees have agents working
+at once: [`contrib/claude-caffeinate.sh`](contrib/claude-caffeinate.sh) is a
+Claude Code hook that stops macOS from idle-sleeping while a session is busy.
+It works for every `claude`, not only ones `wt` started.
+
+Install it, then add the hooks to `~/.claude/settings.json`. Merge them into
+your existing `hooks` arrays; don't replace those arrays:
+
+```sh
+mkdir -p ~/.claude/hooks
+cp contrib/claude-caffeinate.sh ~/.claude/hooks/caffeinate.sh
+```
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/caffeinate.sh start", "timeout": 5 }] }],
+    "SubagentStart":    [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/caffeinate.sh start", "timeout": 5 }] }],
+    "PreToolUse":       [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/caffeinate.sh start", "timeout": 5 }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/caffeinate.sh stop",  "timeout": 5 }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/caffeinate.sh stop",  "timeout": 5 }] }]
+  }
+}
+```
+
+How it behaves:
+
+- **Starts** when you submit a prompt, a subagent starts, or any tool runs. The
+  tool trigger means background subagents still working after the main turn
+  ends keep the Mac awake too.
+- **Stops** at the end of each turn and when the session ends.
+- One `caffeinate -i -m` per session, so calling `start` again doesn't spawn
+  another. It is tied to the `claude` process with `-w`, so it exits with
+  Claude Code even after a crash or a missed stop hook.
+- **Closing the lid still sleeps the Mac.** `caffeinate` only prevents idle
+  sleep. The display can still turn off, which doesn't pause agents; add `-d`
+  in the script if you want it kept on.
+
+Check what is holding the Mac awake with `pmset -g assertions | grep caffeinate`.
+
 ## Development
 
 The source of truth is `wt` in this repo; `~/bin/wt` is an installed copy.
