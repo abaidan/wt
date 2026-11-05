@@ -649,13 +649,19 @@ fetch_prs() {
 # out, or a directory carrying the branch's name as new_pr_worktree names it -
 # with "pr-<n>-" in front for one from a fork.
 #
+# An issue or ticket whose worktree's branch has a pull request also gets a
+# column for it after the mark - "#123 open ✗" - from WT_PR_INDEX (see
+# pr_index_load), which the picker fills from its worktrees tab's cache. It
+# is as wide as the widest such entry, so with no pull requests about it
+# takes no room at all; the pull requests tab has no use for it.
+#
 # Done in one perl pass: with hundreds of items and a hundred worktrees, a
 # lookup per line in bash costs seconds.
 item_rows() {
   local kind="$1" root="$2" raw="$3"
   [[ -n "$WT_SESSION_TABLE" ]] || WT_SESSION_TABLE=$(iterm_session_table || true)
   printf '%s\n' "$raw" | WT_K="$kind" WT_C="$WT_COLOR" WT_W="$(list_worktrees "$root" 0)" \
-    WT_S="$WT_SESSION_TABLE" perl -e "$WT_ITEM_ROWS_PL"
+    WT_S="$WT_SESSION_TABLE" WT_P="$WT_PR_INDEX" perl -e "$WT_ITEM_ROWS_PL"
 }
 
 # The ranks below are those of WT_TAB_RANK_PL: 4 waiting, 3 error, 2 working,
@@ -682,10 +688,12 @@ sub paint { my ($code, $t) = @_; $ENV{WT_C} ? "\e[${code}m$t\e[0m" : $t }
 WT_ITEM_ROWS_PL="$WT_TAB_RANK_PL"'
 use Encode qw(decode_utf8 encode_utf8);
 my $kind = $ENV{WT_K};
-my %by_name;
+my (%by_name, %branch_of, %pr);
+for (split /\n/, ($ENV{WT_P} // "")) { my ($b, $l) = split /\t/, $_, 2; $pr{$b} //= $l if defined $l && length $l }
 for (split /\n/, ($ENV{WT_W} // "")) {
   my ($p, $b) = split /\t/, $_, 2;
   next unless defined $p && length $p;
+  $branch_of{$p} = $b // "";
   my ($d) = $p =~ m{([^/]+)$};
   for my $n ($b, $d) { $by_name{$n} //= $p if defined $n && length $n }
 }
@@ -704,6 +712,22 @@ sub trunc {
   $t = substr($t, 0, 61) . "..." if length($t) > 64;
   return encode_utf8($t);
 }
+# A pull request label ("#12 open, approved, checks failing") cut down to
+# fit a column: the number, the review state when there is one, else the
+# state, and a symbol for the checks. As [text, colour, width].
+sub pr_cell {
+  my ($l) = @_;
+  my ($num, $st) = $l =~ /^(#\d+) (\w+)/ or return;
+  my $word = $l =~ /, approved/ ? "approved" : $l =~ /, changes requested/ ? "changes" : $st;
+  my ($sym, $c) = ("", $st eq "merged" ? 32 : $st eq "closed" ? 90 : 33);
+  if ($l =~ /checks failing/) { ($sym, $c) = (" \xe2\x9c\x97", 31) }
+  elsif ($l =~ /checks pending/) { $sym = " \xe2\x80\xa6" }
+  elsif ($l =~ /checks passing/) { $sym = " \xe2\x9c\x93" }
+  my $t = "$num $word$sym";
+  return [$t, $c, length decode_utf8($t)];
+}
+my (@rows, $prw);
+$prw = 0;
 while (my $line = <STDIN>) {
   chomp $line;
   next unless length $line;
@@ -712,14 +736,24 @@ while (my $line = <STDIN>) {
     my ($n, $head, $title) = @f;
     (my $dir = $head // "") =~ s{/}{-}g;
     my $wp = $by_name{$head // ""} // $by_name{$dir} // $by_name{"pr-$n-$dir"};
-    printf "%s\t#%-6s %s  %s\n", $n, $n, mark($wp), trunc($title);
-  } elsif ($kind eq "issue") {
-    my ($n, $title) = @f;
-    printf "%s\t#%-6s %s  %s\n", $n, $n, mark($by_key{$n}), trunc($title);
+    push @rows, [$n, sprintf("#%-6s", $n), $wp, $title, undef];
   } else {
     my ($k, $title) = @f;
-    printf "%s\t%-11s %s  %s\n", $k, $k, mark($by_key{$k}), trunc($title);
+    my $wp = $by_key{$k};
+    my $b = defined $wp ? $branch_of{$wp} : undef;
+    my $cell = defined $b && exists $pr{$b} ? pr_cell($pr{$b}) : undef;
+    $prw = $cell->[2] if $cell && $cell->[2] > $prw;
+    push @rows, [$k, sprintf($kind eq "issue" ? "#%-6s" : "%-11s", $k), $wp, $title, $cell];
   }
+}
+for my $r (@rows) {
+  my ($id, $shown, $wp, $title, $cell) = @$r;
+  my $col = "";
+  if ($prw) {
+    $col = $cell ? paint($cell->[1], $cell->[0]) . " " x ($prw - $cell->[2]) : " " x $prw;
+    $col .= "  ";
+  }
+  printf "%s\t%s %s  %s%s\n", $id, $shown, mark($wp), $col, trunc($title);
 }
 '
 
@@ -2122,6 +2156,13 @@ ui_refresh() {
   local tab; tab=$(ui_tab_of "$src")
   [[ "$tab" != "worktrees" ]] || mine=0
   ui_rerender "$tab" "$mine"
+  # The issue and ticket rows carry the worktrees' pull requests too.
+  if [[ "$src" == "prindex" ]]; then
+    local t m; m=$(ui_get mine)
+    for t in $(ui_get tabs); do
+      case "$t" in issues|jira) ui_rerender "$t" "$m" ;; esac
+    done
+  fi
 }
 
 ui_fetch() {
@@ -2236,6 +2277,7 @@ ui_render() {
     prs)    kind="pr" ;;
     jira)   kind="jira" ;;
   esac
+  [[ "$kind" == "pr" ]] || WT_PR_INDEX=$(cat "$cache/prindex-0" 2>/dev/null || true)
   rows=$(item_rows "$kind" "$root" "$(cat "$f")")
   if [[ -z "$rows" ]]; then
     if [[ "$mine" == "1" ]]; then

@@ -79,9 +79,9 @@ wt                      # open the picker on the Issues tab
 ╭  Issues 12    Pull requests 11    Jira 4    Worktrees 15   ────────────────────╮
 │ issues >                                                                      │
 │   tab next view · enter open or create · alt-m only mine · esc quit           │
-│ ▌ #242                OTLP gateway dashboard: traffic in does not match…      │
-│   #187    [waiting]   VB365 controller log lines are ingested more than once  │
-│   #186                Recording rules for the VB365 Tenant Sessions trend…    │
+│ ▌ #242                                OTLP gateway dashboard: traffic in do…  │
+│   #187    [waiting]   #301 open ✗     VB365 controller log lines are ingest…  │
+│   #186                                Recording rules for the VB365 Tenant S… │
 ╰───────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -97,7 +97,11 @@ wt                      # open the picker on the Issues tab
 Issues, pull requests and tickets that have a worktree carry a mark saying so:
 `[worktree]`, or — once iTerm2 can tell — what its tab is doing: `[waiting]`
 for a `claude` waiting on you, `[working]`, `[tab open]`. Type `waiting` to see
-just those. The Worktrees tab is the list described under `wt list` below.
+just those. An issue or ticket whose worktree's branch has a pull request also
+shows it in the next column: its number, its state (`open`, `draft`,
+`approved`, `changes`, `merged`, `closed`) and its checks — `✓` passing, `✗`
+failing, `…` pending. That column comes from the Worktrees tab's pull request
+check, so it fills in when that does. The Worktrees tab is the list described under `wt list` below.
 
 The picker never waits for the network. What each source returned last time
 is kept in `~/.cache/wt/<repo>` (or under `$XDG_CACHE_HOME`), so the lists are
