@@ -633,105 +633,99 @@ fetch_prs() {
      --jq '.[] | [.number, .headRefName, (if .isDraft then "[draft] " else "" end) + .title] | @tsv')
 }
 
-# "<name><TAB><path>" for the branch and the directory name of every linked
-# worktree, as a string wrapped in newlines for map_get to search.
-worktree_name_map() {
-  local m
-  m=$(list_worktrees "$1" 0 | awk -F'\t' '{ n = split($1, d, "/"); print $2 "\t" $1; print d[n] "\t" $1 }')
-  printf '\n%s\n' "$m"
-}
-
-# Look $2 up in a map from worktree_name_map (or one shaped like it), leaving
-# the path in MAP_VAL. Pure bash, so a list of hundreds of issues does not pay
-# for a process per line.
-MAP_VAL=""
-map_get() {
-  local map="$1" key="$2"
-  local rest="${map#*$'\n'"$key"$'\t'}"
-  [[ "$rest" != "$map" ]] || return 1
-  MAP_VAL="${rest%%$'\n'*}"
-}
-
-# The mark an issue, pull request or ticket carries when worktree $1 is its:
-# "[worktree]", or what the iTerm2 tab in it is doing, ten columns wide.
-item_mark() {
-  case "$(tab_state "$1")" in
-    4) paint 35 "[waiting] " ;;
-    3) paint 31 "[error]   " ;;
-    2) paint 34 "[working] " ;;
-    1) paint 90 "[tab open]" ;;
-    *) paint 36 "[worktree]" ;;
-  esac
-}
-
-# Menu lines "<id><TAB><display>" for the raw lines of fetch_issues ($2).
+# Menu lines "<id><TAB><display>" for the raw lines of fetch_issues,
+# fetch_prs or jira_search ($3), for kind $1 ("issue", "pr" or "jira").
 #
-# The mark sits between the number and the title, never after the title: fzf
+# The mark sits between the id and the title, never after the title: fzf
 # gives the list only about half the width next to the preview, so anything
 # past a padded title is cut off the edge of the screen in most terminals.
+# It says the item has a worktree - "[worktree]" - or what the iTerm2 tab in
+# that worktree is doing.
 #
-# An issue has a worktree by the same rule as find_worktree_for_issue: a
-# branch or directory named "<n>" or "<n>-anything", so a branch named after
-# an issue whose title slugs to nothing still counts.
-issue_rows() {
-  local root="$1" raw="$2"
+# Which worktree is an item's: for an issue, a branch or directory named
+# "<n>" or "<n>-anything" (the rule of find_worktree_for_issue, so a branch
+# named after an issue whose title slugs to nothing still counts); for a
+# ticket, "<KEY>" or "<KEY>-anything"; for a pull request, its branch checked
+# out, or a directory carrying the branch's name as new_pr_worktree names it -
+# with "pr-<n>-" in front for one from a fork.
+#
+# Done in one perl pass: with hundreds of items and a hundred worktrees, a
+# lookup per line in bash costs seconds.
+item_rows() {
+  local kind="$1" root="$2" raw="$3"
   [[ -n "$WT_SESSION_TABLE" ]] || WT_SESSION_TABLE=$(iterm_session_table || true)
-  local map
-  map=$'\n'$(worktree_name_map "$root" \
-    | awk -F'\t' 'match($1, /^[0-9]+(-|$)/) { k = $1; sub(/-.*/, "", k); print k "\t" $2 }')$'\n'
-  local n title url mark
-  while IFS=$'\t' read -r n title url; do
-    [[ -n "$n" ]] || continue
-    mark="          "
-    if map_get "$map" "$n"; then
-      mark=$(item_mark "$MAP_VAL")
-    fi
-    (( ${#title} <= 64 )) || title="${title:0:61}..."
-    printf '%s\t#%-6s %s  %s\n' "$n" "$n" "$mark" "$title"
-  done <<< "$raw"
+  printf '%s\n' "$raw" | WT_K="$kind" WT_C="$WT_COLOR" WT_W="$(list_worktrees "$root" 0)" \
+    WT_S="$WT_SESSION_TABLE" perl -e "$WT_ITEM_ROWS_PL"
 }
 
-# Menu lines for the raw lines of fetch_prs ($2). A pull request has a
-# worktree when its branch is checked out, or a worktree directory carries the
-# branch's name, as new_pr_worktree names it - with "pr-<n>-" in front for one
-# from a fork.
-pr_rows() {
-  local root="$1" raw="$2"
-  [[ -n "$WT_SESSION_TABLE" ]] || WT_SESSION_TABLE=$(iterm_session_table || true)
-  local map; map=$(worktree_name_map "$root")
-  local n head title mark dir
-  while IFS=$'\t' read -r n head title; do
-    [[ -n "$n" ]] || continue
-    mark="          "
-    dir="${head//\//-}"
-    if map_get "$map" "$head" || map_get "$map" "$dir" || map_get "$map" "pr-$n-$dir"; then
-      mark=$(item_mark "$MAP_VAL")
-    fi
-    (( ${#title} <= 64 )) || title="${title:0:61}..."
-    printf '%s\t#%-6s %s  %s\n' "$n" "$n" "$mark" "$title"
-  done <<< "$raw"
+# The ranks below are those of WT_TAB_RANK_PL: 4 waiting, 3 error, 2 working,
+# 1 a tab with nothing reporting, 0 no tab.
+WT_TAB_RANK_PL='
+my @sessions = map { [ split /\x1f/, $_, -1 ] } grep { length } split /\n/, ($ENV{WT_S} // "");
+my %rank_cache;
+sub rank_of {
+  my ($wp) = @_;
+  return $rank_cache{$wp} if exists $rank_cache{$wp};
+  my $best = 0;
+  for my $s (@sessions) {
+    my ($path, $tag, $st) = map { $_ // "" } @$s[2, 3, 4];
+    if (length $tag) { next unless $tag eq $wp }
+    else { next unless $path eq $wp || index($path, "$wp/") == 0 }
+    my $r = $st eq "waiting" ? 4 : $st eq "error" ? 3 : $st eq "working" ? 2 : 1;
+    $best = $r if $r > $best;
+  }
+  return $rank_cache{$wp} = $best;
 }
+sub paint { my ($code, $t) = @_; $ENV{WT_C} ? "\e[${code}m$t\e[0m" : $t }
+'
 
-# Menu lines for Jira's "<KEY><TAB><summary>" lines ($2). Same rule as for
-# issues: a ticket has a worktree when a branch or directory is "<KEY>" or
-# "<KEY>-anything".
-jira_rows() {
-  local root="$1" raw="$2"
-  [[ -n "$WT_SESSION_TABLE" ]] || WT_SESSION_TABLE=$(iterm_session_table || true)
-  local map
-  map=$'\n'$(worktree_name_map "$root" \
-    | awk -F'\t' 'match($1, /^[A-Z][A-Z0-9_]+-[0-9]+(-|$)/) { k = substr($1, 1, RLENGTH); sub(/-$/, "", k); print k "\t" $2 }')$'\n'
-  local key title mark
-  while IFS=$'\t' read -r key title; do
-    [[ -n "$key" ]] || continue
-    mark="          "
-    if map_get "$map" "$key"; then
-      mark=$(item_mark "$MAP_VAL")
-    fi
-    (( ${#title} <= 64 )) || title="${title:0:61}..."
-    printf '%s\t%-11s %s  %s\n' "$key" "$key" "$mark" "$title"
-  done <<< "$raw"
+WT_ITEM_ROWS_PL="$WT_TAB_RANK_PL"'
+use Encode qw(decode_utf8 encode_utf8);
+my $kind = $ENV{WT_K};
+my %by_name;
+for (split /\n/, ($ENV{WT_W} // "")) {
+  my ($p, $b) = split /\t/, $_, 2;
+  next unless defined $p && length $p;
+  my ($d) = $p =~ m{([^/]+)$};
+  for my $n ($b, $d) { $by_name{$n} //= $p if defined $n && length $n }
 }
+my %by_key;
+my $key_re = $kind eq "issue" ? qr/^([0-9]+)(?:-|$)/ : qr/^([A-Z][A-Z0-9_]+-[0-9]+)(?:-|$)/;
+for my $n (sort keys %by_name) { $by_key{$1} //= $by_name{$n} if $n =~ $key_re }
+my @marks = (["[worktree]", 36], ["[tab open]", 90], ["[working] ", 34], ["[error]   ", 31], ["[waiting] ", 35]);
+sub mark {
+  my ($wp) = @_;
+  return " " x 10 unless defined $wp;
+  my ($t, $c) = @{ $marks[rank_of($wp)] };
+  return paint($c, $t);
+}
+sub trunc {
+  my $t = decode_utf8($_[0] // "");
+  $t = substr($t, 0, 61) . "..." if length($t) > 64;
+  return encode_utf8($t);
+}
+while (my $line = <STDIN>) {
+  chomp $line;
+  next unless length $line;
+  my @f = split /\t/, $line, -1;
+  if ($kind eq "pr") {
+    my ($n, $head, $title) = @f;
+    (my $dir = $head // "") =~ s{/}{-}g;
+    my $wp = $by_name{$head // ""} // $by_name{$dir} // $by_name{"pr-$n-$dir"};
+    printf "%s\t#%-6s %s  %s\n", $n, $n, mark($wp), trunc($title);
+  } elsif ($kind eq "issue") {
+    my ($n, $title) = @f;
+    printf "%s\t#%-6s %s  %s\n", $n, $n, mark($by_key{$n}), trunc($title);
+  } else {
+    my ($k, $title) = @f;
+    printf "%s\t%-11s %s  %s\n", $k, $k, mark($by_key{$k}), trunc($title);
+  }
+}
+'
+
+issue_rows() { item_rows issue "$@"; }
+pr_rows()    { item_rows pr "$@"; }
+jira_rows()  { item_rows jira "$@"; }
 
 pick_issue() {
   local root="$1" only_mine="$2"
@@ -1343,10 +1337,8 @@ pick_worktree_and_open() {
   menu_init "$root" ${branches[@]+"${branches[@]}"}
 
   local here; here=$(git rev-parse --show-toplevel 2>/dev/null || true)
-  local i menu=""
-  for i in "${!paths[@]}"; do
-    menu="$menu$(worktree_menu_line "$i" "${paths[$i]}" "${branches[$i]}" "$here")"$'\n'
-  done
+  local menu
+  menu=$(worktree_menu_lines "$root" 1 "$here")$'\n'
 
   local idx
   if have_fzf; then
@@ -1575,7 +1567,7 @@ main_worktree() {
 }
 
 # Per-run layout, worked out once from the worktrees about to be listed and
-# read back by worktree_menu_line. The branch column is as wide as the longest
+# read back by worktree_menu_lines. The branch column is as wide as the longest
 # branch, so the marks form a column you can run your eye down; the clamp
 # keeps one absurd branch name from pushing every mark off the screen.
 WT_BRANCH_WIDTH=42
@@ -1595,108 +1587,105 @@ menu_init() {
   fi
   WT_BRANCH_WIDTH="$w"
 
-  WT_SESSION_TABLE=$(iterm_session_table || true)
+  # Fresh for each menu, unless the caller has just loaded it itself.
+  if [[ "${WT_KEEP_SESSIONS:-0}" != "1" ]]; then
+    WT_SESSION_TABLE=$(iterm_session_table || true)
+  fi
 }
 
-# What the iTerm2 tabs in worktree $1 are doing, from the table menu_init
-# loaded: a tab `wt` opened is matched by its tag, any other by the directory
-# its shell last reported. When several tabs are in it, the one that most
-# needs you wins. Nothing when no tab is in it, or iTerm2 could not be asked.
-WT_SESSION_TABLE=""
-tab_state() {
-  local wt_path="$1"
-  if [[ -z "$WT_SESSION_TABLE" ]]; then
-    echo 0
-    return 0
-  fi
-
-  local id tty path tag status rank best=0
-  while IFS="$WT_FS" read -r id tty path tag status; do
-    [[ -n "$id" ]] || continue
-    if [[ -n "$tag" ]]; then
-      [[ "$tag" == "$wt_path" ]] || continue
-    else
-      [[ "$path" == "$wt_path" || "$path" == "$wt_path/"* ]] || continue
-    fi
-    case "$status" in
-      waiting) rank=4 ;;
-      error)   rank=3 ;;
-      working) rank=2 ;;
-      *)       rank=1 ;;
-    esac
-    if (( rank > best )); then
-      best=$rank
-    fi
-  done <<< "$WT_SESSION_TABLE"
-  echo "$best"
+# The repo's worktrees whose working tree has changes, one path per line, from
+# the paths on stdin. Asked eight at a time: one `git status` after another
+# takes seconds once there are dozens of worktrees.
+dirty_worktrees() {
+  tr '\n' '\0' | xargs -0 -n 1 -P 8 sh -c '
+    [ -d "$1" ] || exit 0
+    [ -n "$(git -C "$1" status --porcelain 2>/dev/null | head -n 1)" ] && printf "%s\n" "$1"
+    exit 0' _
 }
 
-tab_mark() {
-  case "$(tab_state "$1")" in
-    4) paint 35 "[claude waiting for you]" ;;
-    3) paint 31 "[claude error]" ;;
-    2) paint 34 "[claude working]" ;;
-    1) paint 90 "[tab open]" ;;
-  esac
-}
-
-# Where the worktree sits - but only when that is worth a column. `wt` puts
-# everything it creates at $WT_ROOT/<repo>/<branch>, so a path per row would
-# be the same string over and over, crowding out the branch names and the
-# marks and getting truncated for its trouble. Anything that is not at its
-# expected address still says where it is: the main working tree, a directory
-# whose name no longer matches its branch, a worktree from somewhere else.
-worktree_location() {
-  local wt_path="$1" branch="$2"
-  if [[ -z "$WT_WORKTREE_HOME" || "$wt_path" == "$WT_WORKTREE_HOME/$branch" ]]; then
-    return 0
-  fi
-  if [[ "$wt_path" == "$WT_WORKTREE_HOME/"* ]]; then
-    # Only the leaf, and only a hint's worth of it: the point is that the
-    # directory is not named after the branch, not what it is called. The
-    # preview pane carries the path in full.
-    local dir="${wt_path#"$WT_WORKTREE_HOME"/}"
-    if (( ${#dir} > 30 )); then
-      dir="${dir:0:27}..."
-    fi
-    paint 90 "in $dir"
-    return 0
-  fi
-  paint 90 "$(short_path "$wt_path")"
-}
-
-# Format one worktree as a menu line:
-# "<index><TAB><path><TAB><branch><TAB><marks><TAB><location>".
-# fzf displays fields 3.. and hands back the index. Matching is limited to the
-# branch name, the marks and the location hint, so a long shared path prefix
-# cannot match everything, while typing "merged" narrows the list to what is
-# safe to remove - and typing an issue number still finds a worktree whose
-# branch has been switched away from the name its directory carries.
-worktree_menu_line() {
-  local idx="$1" wt_path="$2" branch="$3" here="$4" current_label="${5:-current}"
-  local marks="" mark
-  mark=$(pr_mark "$(pr_label_for_branch "$branch")")
-  if [[ -n "$mark" ]]; then
-    marks="$marks $mark"
-  fi
-  if [[ -d "$wt_path" ]]; then
-    if worktree_is_dirty "$wt_path"; then
-      marks="$marks $(paint 31 "[uncommitted changes]")"
-    fi
+# The repo's worktrees as menu lines, in the order of list_worktrees $1 $2:
+# "<index><TAB><path><TAB><branch><TAB><marks><TAB><location>". fzf displays
+# fields 3.. and hands back the index. Matching is limited to the branch
+# name, the marks and the location hint, so a long shared path prefix cannot
+# match everything, while typing "merged" narrows the list to what is safe to
+# remove - and typing an issue number still finds a worktree whose branch has
+# been switched away from the name its directory carries.
+#
+# $3 is the worktree you are standing in, marked "[$4]" (default "current").
+# Which worktrees have uncommitted changes is asked of git, unless WT_DIRTY
+# is set to the list already.
+# Pull request labels come from WT_PR_INDEX (see pr_index_load); call
+# menu_init first. The marks, in order:
+#   - the pull request: merged ones green and ticked - the one state meaning
+#     the worktree can go without losing anything - closed grey, open yellow;
+#   - uncommitted changes, or a directory that is gone (a stale entry);
+#   - what its iTerm2 tabs are doing: a tab `wt` opened is matched by its
+#     tag, any other by the directory its shell last reported, and when
+#     several are in it, the one that most needs you wins;
+#   - the worktree you are standing in.
+#
+# Then where the worktree sits - but only when that is worth a column. `wt`
+# puts everything it creates at $WT_ROOT/<repo>/<branch>, so a path per row
+# would be the same string over and over. Anything not at its expected
+# address still says where it is: the main working tree, a directory whose
+# name no longer matches its branch (only the leaf, and only a hint's worth
+# of it - the preview pane carries the path in full), a worktree from
+# somewhere else.
+worktree_menu_lines() {
+  local root="$1" include_main="$2" here="$3" label="${4:-current}"
+  local wts; wts=$(list_worktrees "$root" "$include_main")
+  [[ -n "$wts" ]] || return 0
+  # The picker passes in what it last found (WT_DIRTY), and checks again in
+  # the background.
+  local dirty
+  if [[ -n "${WT_DIRTY+set}" ]]; then
+    dirty="$WT_DIRTY"
   else
-    marks="$marks $(paint 90 "[missing, stale entry]")"
+    dirty=$(printf '%s\n' "$wts" | cut -f1 | dirty_worktrees)
   fi
-  mark=$(tab_mark "$wt_path")
-  if [[ -n "$mark" ]]; then
-    marks="$marks $mark"
-  fi
-  if [[ "$wt_path" == "$here" ]]; then
-    marks="$marks $(paint 36 "[$current_label]")"
-  fi
-  printf '%s\t%s\t%-*s\t%s\t%s' \
-    "$idx" "$wt_path" "$WT_BRANCH_WIDTH" "$branch" "${marks# }" \
-    "$(worktree_location "$wt_path" "$branch")"
+  WT_C="$WT_COLOR" WT_W="$wts" WT_S="$WT_SESSION_TABLE" WT_D="$dirty" \
+    WT_P="$WT_PR_INDEX" WT_HERE="$here" WT_LABEL="$label" \
+    WT_HOMEDIR="$WT_WORKTREE_HOME" WT_WIDTH="$WT_BRANCH_WIDTH" \
+    perl -e "$WT_WORKTREE_LINES_PL"
 }
+
+WT_WORKTREE_LINES_PL="$WT_TAB_RANK_PL"'
+my %dirty = map { $_ => 1 } grep { length } split /\n/, ($ENV{WT_D} // "");
+my %pr;
+for (split /\n/, ($ENV{WT_P} // "")) { my ($b, $l) = split /\t/, $_, 2; $pr{$b} //= $l if defined $l && length $l }
+my @tab = (undef, ["[tab open]", 90], ["[claude working]", 34], ["[claude error]", 31], ["[claude waiting for you]", 35]);
+my ($here, $label, $home, $width) = map { $ENV{$_} // "" } qw(WT_HERE WT_LABEL WT_HOMEDIR WT_WIDTH);
+my $user_home = $ENV{HOME} // "";
+my $i = 0;
+for (split /\n/, ($ENV{WT_W} // "")) {
+  my ($p, $b) = split /\t/, $_, 2;
+  next unless defined $p && length $p;
+  $b //= "";
+  my @m;
+  my $l = ($b ne "" && $b ne "(detached)") ? $pr{$b} : undef;
+  if (defined $l) {
+    push @m, $l =~ /merged$/ ? paint(32, "[\xe2\x9c\x93 PR $l]") : $l =~ /closed$/ ? paint(90, "[PR $l]") : paint(33, "[PR $l]");
+  }
+  if (-d $p) { push @m, paint(31, "[uncommitted changes]") if $dirty{$p} }
+  else { push @m, paint(90, "[missing, stale entry]") }
+  my $r = rank_of($p);
+  push @m, paint($tab[$r][1], $tab[$r][0]) if $r;
+  push @m, paint(36, "[$label]") if $p eq $here;
+  my $loc = "";
+  if ($home ne "" && $p ne "$home/$b") {
+    if (index($p, "$home/") == 0) {
+      my $d = substr($p, length($home) + 1);
+      $d = substr($d, 0, 27) . "..." if length($d) > 30;
+      $loc = paint(90, "in $d");
+    } else {
+      my $sp = $p;
+      $sp = "~" . substr($sp, length $user_home) if $user_home ne "" && index($sp, "$user_home/") == 0;
+      $loc = paint(90, $sp);
+    }
+  }
+  printf "%d\t%s\t%-*s\t%s\t%s\n", $i++, $p, $width, $b, join(" ", @m), $loc;
+}
+'
 
 # What the fzf preview pane shows for the worktree at $1. A subcommand rather
 # than a quoted one-liner inside the fzf call, so that it can be read, and
@@ -1926,14 +1915,8 @@ rm_menu_round() {
 
   local here; here=$(git rev-parse --show-toplevel 2>/dev/null || true)
 
-  # Menu lines are "<index><TAB><path><TAB><branch><TAB><detail>". fzf displays
-  # fields 3.. and hands back the index; --nth=1 keeps typing matched against
-  # the branch name only, so a long shared path prefix cannot match everything.
-  local i menu=""
-  for i in "${!paths[@]}"; do
-    menu="$menu$(worktree_menu_line "$i" "${paths[$i]}" "${branches[$i]}" \
-      "$here" "current, cannot remove")"$'\n'
-  done
+  local i menu
+  menu=$(worktree_menu_lines "$root" 0 "$here" "current, cannot remove")$'\n'
 
   local -a chosen=()
   local reply
@@ -1994,15 +1977,28 @@ rm_menu_round() {
 # it first.
 #
 # fzf calls back into this script (`wt __ui <action>`) to fill the list, to
-# switch tabs and to act on rows, and keeps nothing between those calls but
-# what is in the directory $WT_UI: which tab is showing, whether "mine" is on,
-# and each source's fetched lines, so that a tab already seen comes back
-# without asking the network again. Every row is "<kind><TAB><id><TAB>..." -
-# kind is issue, pr, jira, wt or msg - and fzf shows fields 3 onwards.
+# switch tabs and to act on rows. Between those calls, what the run needs is
+# in the directory $WT_UI: which tab is showing, whether "mine" is on, and
+# what is being refreshed. What each source last returned is kept from run
+# to run in a cache per repo (ui_cache_dir), and the list is always drawn
+# from there: it shows straight away, and is redrawn when the refresh that
+# every run starts in the background comes in. Every row is
+# "<kind><TAB><id><TAB>..." - kind is issue, pr, jira, wt or msg - and fzf
+# shows fields 3 onwards.
 # ---------------------------------------------------------------------------
 
 ui_get() { cat "$WT_UI/$1" 2>/dev/null || true; }
-ui_set() { printf '%s' "$2" > "$WT_UI/$1"; }
+# Written whole and then moved into place, so that the background refreshes,
+# reading as they go, never see a file half written.
+ui_set() { printf '%s' "$2" > "$WT_UI/.$1.$$" && mv "$WT_UI/.$1.$$" "$WT_UI/$1"; }
+
+# Where the picker keeps each repo's lists between runs, named after the
+# repo's main working tree.
+ui_cache_dir() {
+  local main; main=$(main_worktree "$1")
+  local key; key=$(printf '%s' "$main" | shasum | cut -c1-12)
+  printf '%s/wt/%s-%s' "${XDG_CACHE_HOME:-$HOME/.cache}" "$(basename "$main")" "$key"
+}
 
 # The tabs on offer, in order: the GitHub ones when gh is there, Jira when it
 # is set up, and always the worktrees.
@@ -2027,27 +2023,36 @@ ui_title() {
   esac
 }
 
-# How many rows tab $1 has, when that is known without waiting for anything.
+# How many rows tab $1 has, when that is known without waiting for anything:
+# no git and no network, since it is asked on every tab switch.
 ui_count() {
   local tab="$1" f
   if [[ "$tab" == "worktrees" ]]; then
-    list_worktrees "$(ui_get root)" 1 | grep -c '' || true
+    ui_get wtcount
     return 0
   fi
-  f="$WT_UI/raw-$tab-$(ui_get mine)"
+  f="$(ui_get cache)/$tab-$(ui_get mine)"
   [[ -f "$f" ]] || return 0
   grep -c . "$f" || true
 }
 
 # The tab strip, shown in the top border: the tab showing in reverse, the
-# rest dimmed, each with its count once that is known.
+# rest dimmed, each with its count once that is known, and "..." while it is
+# being refreshed.
 ui_strip() {
-  local current; current=$(ui_get tab)
+  local current mine; current=$(ui_get tab); mine=$(ui_get mine)
   local tab n text out=" "
   for tab in $(ui_get tabs); do
     text="$(ui_title "$tab")"
     n=$(ui_count "$tab")
     [[ -z "$n" ]] || text="$text $n"
+    if [[ "$tab" == "worktrees" ]]; then
+      if [[ -f "$WT_UI/running-prindex-0" || -f "$WT_UI/running-dirty-0" ]]; then
+        text="$text..."
+      fi
+    elif [[ -f "$WT_UI/running-$tab-$mine" ]]; then
+      text="$text..."
+    fi
     if [[ "$tab" == "$current" ]]; then
       out="$out$(paint '1;7' " $text ")  "
     else
@@ -2079,18 +2084,44 @@ ui_redraw_actions() {
     "$self" "$(ui_prompt)" "$(ui_hints)" "$(ui_strip)"
 }
 
-# Fetch source $1's lines for "mine" $2 into $WT_UI/raw-$1-$2, or leave why
-# not in raw-$1-$2.err. The .pending marker tells ui_raw a fetch is under way.
-ui_fetch_to() {
-  local src="$1" mine="$2" root="$3"
-  local f="$WT_UI/raw-$src-$mine" out
-  if out=$(ui_fetch "$src" "$mine" "$root" 2>"$f.stderr"); then
-    printf '%s\n' "$out" > "$f.tmp" && mv "$f.tmp" "$f"
+# Fetch source $1 ("issues", "prs", "jira", or for the worktrees tab
+# "prindex" - their pull request labels - and "dirty" - which have
+# uncommitted changes) for "mine" $2 into the cache, then tell fzf, so
+# its tab is drawn again from what just arrived. `wt __ui refresh`,
+# started by ui_ensure_refresh in a session of its own. A failure is kept for
+# this run only, in $WT_UI: the cache holds what last worked.
+ui_refresh() {
+  local src="$1" mine="${2:-0}" root cache key
+  root=$(ui_get root)
+  cache=$(ui_get cache)
+  key="$src-$mine"
+  local tmp="$cache/.$key.$$" err="$WT_UI/err-$key"
+
+  if [[ "$src" == "dirty" ]]; then
+    list_worktrees "$root" 1 | cut -f1 | dirty_worktrees > "$tmp" && mv "$tmp" "$cache/$key"
+  elif [[ "$src" == "prindex" ]]; then
+    local -a branches=()
+    local p b
+    while IFS=$'\t' read -r p b; do
+      [[ -n "$p" ]] || continue
+      branches[${#branches[@]}]="$b"
+    done < <(list_worktrees "$root" 1)
+    pr_index_load "$root" ${branches[@]+"${branches[@]}"} 2>/dev/null || true
+    printf '%s\n' "$WT_PR_INDEX" > "$tmp" && mv "$tmp" "$cache/$key"
+  elif ui_fetch "$src" "$mine" "$root" > "$tmp" 2> "$tmp.err"; then
+    mv "$tmp" "$cache/$key"
+    rm -f "$err" "$tmp.err"
   else
-    grep . "$f.stderr" | head -3 > "$f.err" || true
-    [[ -s "$f.err" ]] || echo "could not list $(ui_title "$src" | tr '[:upper:]' '[:lower:]')" > "$f.err"
+    { grep . "$tmp.err" | head -3 || true; } > "$err.tmp" 2>/dev/null
+    [[ -s "$err.tmp" ]] \
+      || echo "could not list $(ui_title "$src" | tr '[:upper:]' '[:lower:]')" > "$err.tmp"
+    mv "$err.tmp" "$err" 2>/dev/null || true
+    rm -f "$tmp" "$tmp.err"
   fi
-  rm -f "$f.pending" "$f.stderr"
+  rm -f "$WT_UI/running-$key" 2>/dev/null || true
+  local tab; tab=$(ui_tab_of "$src")
+  [[ "$tab" != "worktrees" ]] || mine=0
+  ui_rerender "$tab" "$mine"
 }
 
 ui_fetch() {
@@ -2104,94 +2135,108 @@ ui_fetch() {
   esac
 }
 
-# Print source $1's lines for "mine" $2: from the cache, from a fetch already
-# under way (waited for), or fetched now. Fails, with the reason printed, when
-# the fetch did.
-ui_raw() {
-  local src="$1" mine="$2" root="$3"
-  local f="$WT_UI/raw-$src-$mine" tries=0
-  while [[ -f "$f.pending" && ! -f "$f" && ! -f "$f.err" ]] && (( tries < 600 )); do
-    sleep 0.1
-    tries=$((tries + 1))
-  done
-  if [[ ! -f "$f" && ! -f "$f.err" ]]; then
-    ui_fetch_to "$src" "$mine" "$root"
-  fi
-  if [[ -f "$f.err" ]]; then
-    cat "$f.err"
-    return 1
-  fi
-  cat "$f"
+# Start refreshing source $1 for "mine" $2, unless that has been started
+# already in this run.
+ui_ensure_refresh() {
+  local key="$1-${2:-0}"
+  mkdir "$WT_UI/started-$key" 2>/dev/null || return 0
+  : > "$WT_UI/running-$key"
+  ui_spawn refresh "$1" "${2:-0}"
 }
 
-# Look up the pull request labels of the worktrees into $WT_UI/pr-index.
-ui_pr_index_build() {
-  local root="$1" f="$WT_UI/pr-index"
-  local -a branches=()
-  local p b
-  while IFS=$'\t' read -r p b; do
-    [[ -n "$p" ]] || continue
-    branches[${#branches[@]}]="$b"
-  done < <(list_worktrees "$root" 1)
-  pr_index_load "$root" ${branches[@]+"${branches[@]}"} 2>/dev/null || true
-  printf '%s' "$WT_PR_INDEX" > "$f.tmp" && mv "$f.tmp" "$f"
-  rm -f "$f.pending"
+# The iTerm2 session table (iterm_session_table), asked at most every few
+# seconds: it takes a third of a second, and every tab switch draws a list.
+ui_session_table() {
+  local f="$WT_UI/sessions" now age
+  now=$(date +%s)
+  if [[ -f "$f" ]]; then
+    age=$(( now - $(stat -f %m "$f" 2>/dev/null || echo 0) ))
+    if (( age < 3 )); then
+      cat "$f"
+      return 0
+    fi
+  fi
+  local table; table=$(iterm_session_table || true)
+  printf '%s' "$table" > "$f.$$" && mv "$f.$$" "$f"
+  printf '%s' "$table"
 }
 
-# The pull request labels of the worktrees, looked up once per picker: from
-# the lookup started in the background, or now.
-ui_pr_index() {
-  local root="$1" f="$WT_UI/pr-index" tries=0
-  while [[ -f "$f.pending" && ! -f "$f" ]] && (( tries < 600 )); do
-    sleep 0.1
-    tries=$((tries + 1))
-  done
-  [[ -f "$f" ]] || ui_pr_index_build "$root"
-  cat "$f"
+# Run `wt __ui $@` detached, in a session of its own: fzf kills a list command
+# it no longer wants together with its children, and this must outlive it. It
+# inherits FZF_PORT from that command.
+ui_spawn() {
+  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$WT_SELF" __ui "$@" \
+    </dev/null >/dev/null 2>&1 &
+}
+
+# The tab that source $1 is shown on, and the "mine" its rows are kept under:
+# the worktrees tab does not have one.
+ui_tab_of() {
+  case "$1" in
+    prindex|dirty|worktrees) echo "worktrees" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Ask fzf, through its --listen port, to do $1. It wants the key cmd_ui made
+# for this run. After fzf has closed there is no one to ask, and nothing to do.
+ui_poke() {
+  [[ -n "${FZF_PORT:-}" && -d "$WT_UI" ]] || return 0
+  curl -s -m 2 -X POST -H "x-api-key: ${FZF_API_KEY:-}" \
+    "http://127.0.0.1:$FZF_PORT" -d "$1" >/dev/null 2>&1 || true
 }
 
 # A row that only says something; enter and ctrl-x pass over it.
 ui_msg() { printf 'msg\t\t%s\n' "$(paint "${2:-90}" "$1")"; }
 
-# `wt __ui rows`: the rows of the tab showing.
-ui_rows() {
-  local root tab mine
+# The rows of tab $1 for "mine" $2, drawn from the cache. Returns 2 when there
+# is nothing to show yet - the tab is loading, or failed to - since such rows
+# are not worth keeping.
+ui_render() {
+  local tab="$1" mine="$2" root cache
   root=$(ui_get root)
-  tab=$(ui_get tab)
-  mine=$(ui_get mine)
+  cache=$(ui_get cache)
   WT_COLOR=$(ui_get color)
-  WT_SESSION_TABLE=$(iterm_session_table || true)
+  WT_SESSION_TABLE=$(ui_session_table)
 
   if [[ "$tab" == "worktrees" ]]; then
-    local -a paths=() branches=()
-    local path branch
-    while IFS=$'\t' read -r path branch; do
-      [[ -n "$path" ]] || continue
-      paths[${#paths[@]}]="$path"
-      branches[${#branches[@]}]="$branch"
+    WT_PR_INDEX=$(cat "$cache/prindex-0" 2>/dev/null || true)
+    local -a branches=()
+    local p b
+    while IFS=$'\t' read -r p b; do
+      [[ -n "$p" ]] || continue
+      branches[${#branches[@]}]="$b"
     done < <(list_worktrees "$root" 1)
-    WT_PR_INDEX=$(ui_pr_index "$root")
-    menu_init "$root" ${branches[@]+"${branches[@]}"}
-    local here i
-    here=$(ui_get here)
-    for i in "${!paths[@]}"; do
-      printf 'wt\t%s\n' "$(worktree_menu_line "$i" "${paths[$i]}" "${branches[$i]}" "$here" | cut -f2-)"
-    done
+    ui_set wtcount "${#branches[@]}"
+    WT_KEEP_SESSIONS=1 menu_init "$root" ${branches[@]+"${branches[@]}"}
+    # Never cached yet: drawn without the marks for now, until the check that
+    # the first list started comes in.
+    local dirty; dirty=$(cat "$cache/dirty-0" 2>/dev/null || true)
+    WT_DIRTY="$dirty" worktree_menu_lines "$root" 1 "$(ui_get here)" \
+      | cut -f2- | sed "s/^/wt$(printf '\t')/"
     return 0
   fi
 
-  local raw kind rows
-  if ! raw=$(ui_raw "$tab" "$mine" "$root"); then
-    while IFS= read -r line; do
-      ui_msg "$line" 31
-    done <<< "$raw"
-    return 0
+  local f="$cache/$tab-$mine" err="$WT_UI/err-$tab-$mine"
+  if [[ ! -f "$f" ]]; then
+    if [[ -f "$err" ]]; then
+      local line
+      while IFS= read -r line; do
+        ui_msg "$line" 31
+      done < "$err"
+    else
+      ui_msg "Loading $(ui_title "$tab" | tr '[:upper:]' '[:lower:]')..."
+    fi
+    return 2
   fi
+
+  local kind rows
   case "$tab" in
-    issues) kind="issue"; rows=$(issue_rows "$root" "$raw") ;;
-    prs)    kind="pr";    rows=$(pr_rows "$root" "$raw") ;;
-    jira)   kind="jira";  rows=$(jira_rows "$root" "$raw") ;;
+    issues) kind="issue" ;;
+    prs)    kind="pr" ;;
+    jira)   kind="jira" ;;
   esac
+  rows=$(item_rows "$kind" "$root" "$(cat "$f")")
   if [[ -z "$rows" ]]; then
     if [[ "$mine" == "1" ]]; then
       ui_msg "Nothing open of yours here (alt-m shows everyone's)"
@@ -2201,6 +2246,74 @@ ui_rows() {
     return 0
   fi
   printf '%s\n' "$rows" | sed "s/^/$kind$(printf '\t')/"
+}
+
+# `wt __ui rerender <tab> <mine>`: draw the tab's rows again into
+# $WT_UI/rows-<tab>-<mine>, and when they came out different - new data, a
+# claude that has started waiting - have fzf redraw, if that tab is showing.
+# One at a time per tab; a request made while one runs is picked up by it.
+ui_rerender() {
+  local tab="$1" mine="$2" k="$1-$2"
+  local f="$WT_UI/rows-$k" out rc changed=0
+  : > "$WT_UI/want-$k" 2>/dev/null || return 0
+  mkdir "$WT_UI/rendering-$k" 2>/dev/null || return 0
+  while [[ -f "$WT_UI/want-$k" ]]; do
+    rm -f "$WT_UI/want-$k"
+    rc=0
+    out=$(ui_render "$tab" "$mine") || rc=$?
+    if (( rc == 0 )) && [[ ! -f "$f" || "$out" != "$(cat "$f")" ]]; then
+      printf '%s\n' "$out" > "$f.$$" && mv "$f.$$" "$f"
+      changed=1
+    fi
+  done
+  rmdir "$WT_UI/rendering-$k" 2>/dev/null || true
+
+  local self; self=$(printf '%q' "$WT_SELF")
+  local showing; showing=$(ui_get tab)
+  if (( changed )) && [[ "$showing" == "$tab" ]] \
+     && { [[ "$tab" == "worktrees" ]] || [[ "$mine" == "$(ui_get mine)" ]]; }; then
+    ui_poke "reload($self __ui rows)"
+  else
+    ui_poke "transform-border-label($self __ui strip)"
+  fi
+}
+
+# `wt __ui rows`: the rows of the tab showing. The rows last drawn for it are
+# shown straight away - a tab switch never waits - and drawn again in the
+# background, which redraws the list only if something changed. The first
+# call of a run starts every source refreshing, so that what the cache holds
+# from last time is brought up to date.
+ui_rows() {
+  local tab mine
+  tab=$(ui_get tab)
+  mine=$(ui_get mine)
+  [[ "$tab" != "worktrees" ]] || mine=0
+
+  if mkdir "$WT_UI/started" 2>/dev/null; then
+    local t
+    for t in $(ui_get tabs); do
+      if [[ "$t" == "worktrees" ]]; then
+        ui_ensure_refresh prindex 0
+        ui_ensure_refresh dirty 0
+      else
+        ui_ensure_refresh "$t" "$mine"
+      fi
+    done
+  fi
+  [[ "$tab" == "worktrees" ]] || ui_ensure_refresh "$tab" "$mine"
+
+  local f="$WT_UI/rows-$tab-$mine"
+  if [[ -f "$f" ]]; then
+    cat "$f"
+    ui_spawn rerender "$tab" "$mine"
+    return 0
+  fi
+  local out rc=0
+  out=$(ui_render "$tab" "$mine") || rc=$?
+  if (( rc == 0 )); then
+    printf '%s\n' "$out" > "$f.$$" && mv "$f.$$" "$f"
+  fi
+  printf '%s\n' "$out"
 }
 
 # `wt __ui switch 1|-1`: move to the next or previous tab.
@@ -2261,6 +2374,8 @@ ui_rm() {
     ( remove_one_worktree "$path" "${branch:-(detached)}" ) < /dev/tty || true
   done < "$file"
   (( n > 0 )) || return 0
+  # Every tab's kept rows may name a worktree that is gone now.
+  rm -f "$WT_UI"/rows-* 2>/dev/null || true
   echo
   read -r -s -n 1 -p "Press any key to go back to the picker." < /dev/tty || true
 }
@@ -2326,20 +2441,19 @@ cmd_ui() {
   ui_set mine "$mine"
   ui_set color "$WT_COLOR"
   ui_set here "$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  ui_set wtcount "$(list_worktrees "$root" 1 | grep -c '' || true)"
 
-  # Every source starts loading now, in the background, so that by the time
-  # a tab is switched to its list is usually there already.
-  local t
-  for t in $tabs; do
-    [[ "$t" != "worktrees" ]] || continue
-    : > "$WT_UI/raw-$t-$mine.pending"
-    ( ui_fetch_to "$t" "$mine" "$root" ) >/dev/null 2>&1 &
-  done
-  : > "$WT_UI/pr-index.pending"
-  ( ui_pr_index_build "$root" ) >/dev/null 2>&1 &
+  local cache; cache=$(ui_cache_dir "$root")
+  mkdir -p "$cache" || die "could not create the cache directory $cache"
+  ui_set cache "$cache"
+
+  # The background refreshes redraw the list through fzf's --listen port; the
+  # key keeps anything else on the machine from driving it.
+  FZF_API_KEY=$(head -c 32 /dev/urandom | shasum | cut -c1-40)
+  export FZF_API_KEY
 
   local self; self=$(printf '%q' "$WT_SELF")
-  fzf --ansi --multi --delimiter=$'\t' --with-nth=3.. \
+  fzf --ansi --multi --delimiter=$'\t' --with-nth=3.. --listen \
     --height=90% --border --reverse --border-label-pos=2 \
     --prompt="$(ui_prompt)" --header="$(ui_hints)" --border-label="$(ui_strip)" \
     --preview="$self __ui preview {1} {2}" --preview-window='right:48%:wrap' \
@@ -2360,6 +2474,8 @@ cmd_ui_action() {
   shift || true
   case "$action" in
     rows)    ui_rows ;;
+    refresh) ui_refresh "$@" ;;
+    rerender) ui_rerender "$@" ;;
     strip)   WT_COLOR=$(ui_get color); ui_strip ;;
     switch)  ui_switch "$@" ;;
     mine)    ui_mine ;;

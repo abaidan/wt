@@ -99,11 +99,21 @@ Issues, pull requests and tickets that have a worktree carry a mark saying so:
 for a `claude` waiting on you, `[working]`, `[tab open]`. Type `waiting` to see
 just those. The Worktrees tab is the list described under `wt list` below.
 
-Every source starts loading in the background the moment the picker opens, so
-by the time you press <kbd>Tab</kbd> its list is usually there already; each
-is fetched once per run, and the counts fill in on the tab strip as they
-arrive. A source that fails says why in its own tab — a Jira token that has
-been rejected, say — without holding up the others.
+The picker never waits for the network. What each source returned last time
+is kept in `~/.cache/wt/<repo>` (or under `$XDG_CACHE_HOME`), so the lists are
+there the moment it opens, and every source is refreshed in the background
+straight away: the tab strip shows `...` against a tab while that is under
+way, and the list redraws itself when the refresh lands — through fzf's
+`--listen` port, behind a key made for that run. Switching tabs shows the
+rows last drawn for the tab and redraws only if something has changed since,
+so it is immediate however many worktrees there are. A tab with nothing
+cached yet says it is loading; a source that fails says why in its own tab —
+a Jira token that has been rejected, say — without holding up the others.
+
+The same goes for the slow parts of the Worktrees tab: the pull request
+labels and which worktrees have uncommitted changes (asked of git eight
+worktrees at a time) come from the last run and are brought up to date in
+the background. Deleting the cache directory is always safe.
 
 `wt new`, `wt list` and `wt open` with nothing named open this same picker, on
 the tab they're about. Without fzf there are no tabs, and each command falls
