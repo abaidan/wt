@@ -833,8 +833,8 @@ jira_api() {
   token=$(jira_token) || token=""
   [[ -n "$token" ]] || die "no Jira API token for $email. Create one at
   https://id.atlassian.com/manage-profile/security/api-tokens
-and store it with (it prompts for the token):
-  security add-generic-password -s wt-jira -a '$email' -w
+copy it, and store it from the clipboard with:
+  security add-generic-password -U -s wt-jira -a '$email' -w \"\$(pbpaste)\"
 or set WT_JIRA_TOKEN."
 
   local creds="$email:$token"
@@ -857,8 +857,15 @@ or set WT_JIRA_TOKEN."
   local code="${resp##*$'\n'}"
   resp="${resp%$'\n'*}"
   if [[ "$code" != 2* ]]; then
-    [[ "$code" != 401 ]] \
-      || die "Jira rejected the credentials for $email (HTTP 401); check WT_JIRA_EMAIL and the API token (an API token, not a password: about 190 characters, starting ATATT)"
+    if [[ "$code" == 401 ]]; then
+      # The keychain's own prompt reads at most 128 characters, and a token
+      # typed or pasted into it is cut short without a word.
+      if (( ${#token} == 128 )); then
+        die "Jira rejected the credentials for $email (HTTP 401). The token is exactly 128 characters - cut short by the 'security ... -w' prompt, which reads no more. Copy the token and store it from the clipboard instead:
+  security add-generic-password -U -s wt-jira -a '$email' -w \"\$(pbpaste)\""
+      fi
+      die "Jira rejected the credentials for $email (HTTP 401); check WT_JIRA_EMAIL and the API token (an API token, not a password: about 190 characters, starting ATATT)"
+    fi
     local msg
     msg=$(printf '%s' "$resp" \
             | jq -r '[.errorMessages[]?, ((.errors // {}) | .[])] | join("; ")' 2>/dev/null) \
@@ -2416,8 +2423,10 @@ Env vars:
 Jira (Cloud), needs curl and jq:
   WT_JIRA_URL      Your site, e.g. https://example.atlassian.net (required)
   WT_JIRA_EMAIL    Atlassian account (default: git config --global user.email)
-  WT_JIRA_TOKEN    API token; better kept in the keychain instead:
-                     security add-generic-password -s wt-jira -a <email> -w
+  WT_JIRA_TOKEN    API token; better kept in the keychain instead (copy the
+                   token, then store it from the clipboard - the prompt
+                   that "-w" alone gives cuts it at 128 characters):
+                     security add-generic-password -U -s wt-jira -a <email> -w "$(pbpaste)"
   WT_JIRA_PROJECT  Project the picker lists open tickets of (without it,
                    the picker lists your own open tickets)
   WT_JIRA_JQL      JQL filter replacing the picker's default (no ORDER BY)

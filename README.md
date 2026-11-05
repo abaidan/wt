@@ -185,8 +185,15 @@ the site, and keep the token in the login keychain rather than a shell profile:
 ```sh
 export WT_JIRA_URL=https://example.atlassian.net
 export WT_JIRA_PROJECT=SRE            # optional, see below
-security add-generic-password -s wt-jira -a you@example.com -w   # prompts for the token
+# copy the token, then:
+security add-generic-password -U -s wt-jira -a you@example.com -w "$(pbpaste)"
 ```
+
+Store it from the clipboard like that, not at the prompt a bare `-w` gives:
+that prompt reads at most 128 characters, and a Jira token is about 190, so
+it is cut short without a word and Jira answers 401. `wt` recognises a token
+of exactly 128 characters and says so. Passing `"$(pbpaste)"` keeps the token
+itself out of your shell history.
 
 The account is `git config --global user.email` — the global one, not a repo's own — unless `WT_JIRA_EMAIL` says otherwise.
 `WT_JIRA_TOKEN` works too, in place of the keychain. The token is handed to
