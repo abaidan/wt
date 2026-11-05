@@ -28,7 +28,7 @@ Issue #1234: Add a retry to the upload queue
 Fetching latest 'main'...
 Creating worktree at ~/worktrees/wt/1234-add-a-retry-to-the-upload-queue
 Prefilling claude's prompt (press enter to send it):
-  Work on this GitHub issue: https://github.com/abaidan/wt/issues/1234
+  Work on this GitHub issue: https://github.com/abaidan/wt/issues/1234 Open PR, watch bots.
 ```
 
 …and a new iTerm2 tab opens in that worktree running Claude Code, with the
@@ -88,11 +88,11 @@ wt                      # open the picker on the Issues tab
 | Key | What it does |
 |---|---|
 | <kbd>Tab</kbd> / <kbd>⇧Tab</kbd> | Next / previous tab: Issues, Pull requests, Jira (when set up), Worktrees |
-| <kbd>Enter</kbd> | Go to it: switch to the worktree's iTerm2 tab, or open one — and for an issue, pull request or ticket with no worktree yet, create it first, exactly as `wt new` does |
+| <kbd>Enter</kbd> | Go to it: switch to the worktree's iTerm2 tab, or open one — and for an issue, pull request or ticket with no worktree yet, create it first, exactly as `wt new` does. The picker stays open in its own tab, ready for the next one; only an error waits for a key |
 | <kbd>alt-m</kbd> | Only mine: issues assigned to you, pull requests you opened, tickets assigned to you. Press again for everyone's |
 | <kbd>ctrl-space</kbd> | Mark a worktree, to remove several at once |
 | <kbd>ctrl-x</kbd> | On the Worktrees tab: remove the marked worktrees, or the one under the cursor, with the same questions as `wt rm`; then back to the picker |
-| <kbd>Esc</kbd> | Quit |
+| <kbd>Esc</kbd> | Quit the picker |
 
 Issues, pull requests and tickets that have a worktree carry a mark saying so:
 `[worktree]`, or — once iTerm2 can tell — what its tab is doing: `[waiting]`
@@ -360,9 +360,9 @@ All optional, all environment variables.
 | `WT_BASE_BRANCH` | the repo's default branch | Branch to create new branches from. |
 | `WT_CLAUDE_ARGS` | `--permission-mode auto` | Arguments passed to `claude`. Set empty for a plain `claude`. |
 | `WT_NO_CLAUDE` | unset | Set to `1` to open the tab and `cd` there without launching Claude. |
-| `WT_PROMPT_TEMPLATE` | `Work on this GitHub issue: {url}` | Prompt typed into Claude in a newly created issue worktree; `{url}` is replaced with the issue URL. Set empty to disable. |
+| `WT_PROMPT_TEMPLATE` | `Work on this GitHub issue: {url} Open PR, watch bots.` | Prompt typed into Claude in a newly created issue worktree; `{url}` is replaced with the issue URL. Set empty to disable. |
 | `WT_PR_PROMPT_TEMPLATE` | `Work on this pull request: {url}` | The same, for a pull request's worktree. |
-| `WT_JIRA_PROMPT_TEMPLATE` | `Work on this Jira ticket: {url}` | The same, for a Jira ticket's worktree. |
+| `WT_JIRA_PROMPT_TEMPLATE` | `Work on this Jira ticket: {url} Open PR, watch bots.` | The same, for a Jira ticket's worktree. |
 | `WT_PREFILL_DELAY` | `6` | Seconds to wait for Claude to start before typing that prompt. |
 | `WT_ISSUE_LIMIT` | `1000` | Most open issues, pull requests or tickets a picker fetches; fzf searches all of them. |
 | `WT_NO_PULL` | unset | Set to `1` so `wt new` only fetches, leaving your local base branch where it is. |

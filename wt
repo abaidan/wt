@@ -86,13 +86,13 @@ WT_ROOT="${WT_ROOT:-$HOME/worktrees}"
 # replaced with that item's URL. Assigned the long way round because a "}"
 # inside ${var=default} would end the expansion early.
 if [[ -z "${WT_PROMPT_TEMPLATE+set}" ]]; then
-  WT_PROMPT_TEMPLATE='Work on this GitHub issue: {url}'
+  WT_PROMPT_TEMPLATE='Work on this GitHub issue: {url} Open PR, watch bots.'
 fi
 if [[ -z "${WT_PR_PROMPT_TEMPLATE+set}" ]]; then
   WT_PR_PROMPT_TEMPLATE='Work on this pull request: {url}'
 fi
 if [[ -z "${WT_JIRA_PROMPT_TEMPLATE+set}" ]]; then
-  WT_JIRA_PROMPT_TEMPLATE='Work on this Jira ticket: {url}'
+  WT_JIRA_PROMPT_TEMPLATE='Work on this Jira ticket: {url} Open PR, watch bots.'
 fi
 
 # This script's own path, so that the fzf preview can call back into it. A
@@ -2392,10 +2392,26 @@ ui_preview() {
   esac
 }
 
-# `wt __ui go <kind> <id>`: what enter does, run in place of fzf once it
-# closes. Everything but a worktree goes through `wt new`, which switches to
-# the worktree when there already is one.
+# `wt __ui go <kind> <id>`: what enter does. fzf runs it and then comes back,
+# so the picker stays open in its own tab while the worktree opens in
+# another. Everything but a worktree goes through `wt new`, which switches to
+# the worktree when there already is one. What it prints shows while it
+# works; only a failure waits for a key, so that it can be read.
 ui_go() {
+  local kind="$1"
+  [[ "$kind" != "msg" ]] || return 0
+  printf '\033[H\033[J'
+  local rc=0
+  ( ui_go_one "$@" ) < /dev/tty || rc=$?
+  if (( rc != 0 )); then
+    echo
+    read -r -s -n 1 -p "Press any key to go back to the picker." < /dev/tty || true
+  fi
+  # The item now has a worktree, and maybe a tab: its mark has changed.
+  rm -f "$WT_UI"/rows-* 2>/dev/null || true
+}
+
+ui_go_one() {
   local kind="$1" id="${2:-}"
   case "$kind" in
     wt)
@@ -2464,7 +2480,7 @@ cmd_ui() {
     --bind="ctrl-space:toggle" \
     --bind="alt-m:transform($self __ui mine)" \
     --bind="ctrl-x:transform($self __ui rm-key)" \
-    --bind="enter:become($self __ui go {1} {2})" \
+    --bind="enter:execute($self __ui go {1} {2})+reload($self __ui rows)" \
     < /dev/null || true
 }
 
