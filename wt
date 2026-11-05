@@ -89,7 +89,7 @@ if [[ -z "${WT_PROMPT_TEMPLATE+set}" ]]; then
   WT_PROMPT_TEMPLATE='Work on this GitHub issue: {url} Open PR, watch bots.'
 fi
 if [[ -z "${WT_PR_PROMPT_TEMPLATE+set}" ]]; then
-  WT_PR_PROMPT_TEMPLATE='Work on this pull request: {url}'
+  WT_PR_PROMPT_TEMPLATE='Work on this pull request: {url} Watch bots.'
 fi
 if [[ -z "${WT_JIRA_PROMPT_TEMPLATE+set}" ]]; then
   WT_JIRA_PROMPT_TEMPLATE='Work on this Jira ticket: {url} Open PR, watch bots.'

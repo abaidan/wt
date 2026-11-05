@@ -361,7 +361,7 @@ All optional, all environment variables.
 | `WT_CLAUDE_ARGS` | `--permission-mode auto` | Arguments passed to `claude`. Set empty for a plain `claude`. |
 | `WT_NO_CLAUDE` | unset | Set to `1` to open the tab and `cd` there without launching Claude. |
 | `WT_PROMPT_TEMPLATE` | `Work on this GitHub issue: {url} Open PR, watch bots.` | Prompt typed into Claude in a newly created issue worktree; `{url}` is replaced with the issue URL. Set empty to disable. |
-| `WT_PR_PROMPT_TEMPLATE` | `Work on this pull request: {url}` | The same, for a pull request's worktree. |
+| `WT_PR_PROMPT_TEMPLATE` | `Work on this pull request: {url} Watch bots.` | The same, for a pull request's worktree. |
 | `WT_JIRA_PROMPT_TEMPLATE` | `Work on this Jira ticket: {url} Open PR, watch bots.` | The same, for a Jira ticket's worktree. |
 | `WT_PREFILL_DELAY` | `6` | Seconds to wait for Claude to start before typing that prompt. |
 | `WT_ISSUE_LIMIT` | `1000` | Most open issues, pull requests or tickets a picker fetches; fzf searches all of them. |
