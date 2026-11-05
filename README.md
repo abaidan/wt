@@ -39,6 +39,7 @@ issue link waiting in the prompt box for you to send.
 | **git** | Required, with `git worktree` support. Developed against 2.54. |
 | **bash** | Required. Works on macOS's system bash 3.2. |
 | **macOS + iTerm2** | Required for opening tabs — the tab is driven by AppleScript. |
+| **iTerm2 3.7+** | Optional. Its `it2` command lets the pickers show which worktrees have a tab open, and what the `claude` in it is doing; that part also needs iTerm2's Claude Code integration (iTerm2 › Install Claude Code Integration). Without either, those marks are left out. |
 | **[gh](https://cli.github.com)** | Optional. Needed for the issue and pull request pickers, issue-named branches, issue links, and pull request status in the `wt list` / `wt rm` pickers. Run `gh auth login` once. |
 | **curl + [jq](https://jqlang.org)** | Optional. Needed for Jira tickets. curl ships with macOS; `brew install jq`. |
 | **[fzf](https://github.com/junegunn/fzf)** | Optional. Gives the interactive pickers; without it every picker falls back to a numbered menu. |
@@ -204,6 +205,23 @@ branch name **and** the marks — so `merged` narrows the list to exactly the
 worktrees that have landed. Paths are deliberately not matched: they all share
 a prefix, so typing would match everything.
 
+**What the tab in each worktree is doing** is marked too, when iTerm2 can say:
+
+```
+  1234-add-a-retry-to-the-upload-queue   [PR #1240 open]  [claude waiting for you]
+  1189-cache-the-dashboard-summary       [✓ PR #1201 merged]  [tab open]
+  1301-retry-the-webhook                 [claude working]
+```
+
+`[claude waiting for you]` (magenta) means its `claude` has stopped and wants
+an answer; `[claude working]` (blue) is mid-turn; `[tab open]` (grey) means a
+tab is there but nothing is running in it that reports its status. When a
+worktree has several tabs, the one that most needs you wins. Type `waiting`
+into the picker to see only the sessions holding up on you. This comes from
+iTerm2 3.7's Session Status, which its Claude Code integration feeds, read in
+one `it2 session list` call; with an older iTerm2, the API off, or the
+integration not installed, the marks are left out or reduced to `[tab open]`.
+
 Nor are paths printed, unless there is something to say. `wt` puts every
 worktree it creates at `$WT_ROOT/<repo>/<branch>`, so a path per row is the
 same string over and over, crowding out the branch names and getting
@@ -222,8 +240,8 @@ silently. Set `WT_NO_PR=1` to skip the lookups entirely.
 If an iTerm2 tab is already sitting in the chosen worktree, `wt` switches to
 it rather than opening a second one — so the `claude` already running there
 keeps its session instead of a fresh one starting beside it. Tabs are found the
-same way `wt rm` finds them (by where their processes actually are), and the
-tab you ran `wt list` from doesn't count. Only when no tab is in the worktree
+same way `wt rm` finds them (by the tag `wt` gave the tab, or by where its
+processes actually are), and the tab you ran `wt list` from doesn't count. Only when no tab is in the worktree
 is a new one opened. `WT_NEW_TAB=1` always opens a new tab.
 
 `wt open` is the same picker; `wt open <branch>` skips it and opens that branch
@@ -251,7 +269,7 @@ branch too. When that's done it drops you back into the picker with what's
 left, so you can keep clearing without re-running the command; <kbd>Esc</kbd>
 (or a blank answer in the numbered list) is what ends it.
 
-Three safety behaviours, since removal is forced underneath:
+A few safety behaviours, since removal is forced underneath:
 
 - **Uncommitted changes** are flagged in the picker and need a separate
   confirmation before they're discarded. Declining skips that one and continues.
@@ -262,12 +280,16 @@ Three safety behaviours, since removal is forced underneath:
   standing in is flagged and skipped rather than failing mid-run.
 - **Its iTerm2 tabs are closed with it.** A tab left sitting in a directory
   that no longer exists is stranded — every command it runs fails, and a
-  `claude` in it has lost the tree it was working on. Tabs are found by asking
-  the kernel where each session's processes actually are, not iTerm2's
-  `session.path`, which only refreshes when the shell draws a prompt and so
-  still reports the old directory for a tab that has been running `claude`
-  since it opened. They are closed only after the removal itself succeeds.
-  `WT_KEEP_TABS=1` turns this off.
+  `claude` in it has lost the tree it was working on. A tab `wt` opened is
+  tagged with its worktree (an iTerm2 user variable, `user.wt_worktree`) and
+  found by that tag. Any other tab is found by asking the kernel where each
+  session's processes actually are, not iTerm2's `session.path`, which only
+  refreshes when the shell draws a prompt. Tabs are closed only after the
+  removal itself succeeds. `WT_KEEP_TABS=1` turns this off.
+- **A `claude` still mid-turn** needs a confirmation before its worktree goes,
+  since whatever it was doing would be lost. This needs iTerm2 3.7 and its
+  Claude Code integration, which report when a `claude` is working; without
+  them there's no such prompt.
 
 ## Configuration
 

@@ -157,6 +157,11 @@ open_iterm_tab() {
     write text \"$(applescript_escape "$prefill")\" newline no"
   fi
 
+  # The session is tagged with the worktree it was opened for, in a user
+  # variable that stays with it whatever runs there later. iterm_session_table
+  # reads the tag back, so this tab is found by name instead of by asking the
+  # kernel where its processes are.
+  #
   # The new session is captured before anything is written to it. Addressing
   # "current session of current window" instead would re-resolve on every
   # command, so the prefill typed after the delay would land in whatever tab
@@ -172,6 +177,7 @@ tell application "iTerm2"
   end if
   set theSession to current session of theWindow
   tell theSession
+    set variable named "user.wt_worktree" to "$(applescript_escape "$dir")"
     write text "$full_cmd"
 $prefill_script
   end tell
@@ -210,12 +216,63 @@ tty_is_in() {
       '
 }
 
-# Print the id of every iTerm2 session sitting in $1, or below it. This finds
-# the tab `wt` opened for a worktree as well as any the user opened by hand.
-# Silent when iTerm2 is not running - and it is asked whether it is running
-# rather than told anything, so this never launches it.
+# iTerm2's own command-line client, which ships inside the app from 3.7 on
+# and is put on the PATH by its shell integration.
+it2_bin() {
+  if command -v it2 >/dev/null 2>&1; then
+    command -v it2
+    return 0
+  fi
+  local b=/Applications/iTerm.app/Contents/Resources/utilities/it2
+  [[ -x "$b" ]] || return 1
+  echo "$b"
+}
+
+# Fields of iterm_session_table, split on the ASCII unit separator: a tab or a
+# space is whitespace to `read`, which runs empty fields together.
+WT_FS=$'\x1f'
+
+# One line per iTerm2 session, asked of `it2` in a single call:
+# "id<US>tty<US>path<US>tag<US>status", where tag is the worktree `wt` opened
+# the tab for (see open_iterm_tab) and status is what iTerm2's Claude Code
+# integration last reported - waiting, working, idle and so on - or empty.
+# path is the directory the shell last reported; it goes stale while a
+# program such as claude runs, which is what the tag is for.
+#
+# Fails when there is nothing to ask: iTerm2 not running (checked first, so
+# this never launches it), no it2 (iTerm2 before 3.7), or its API turned off.
+# The perl alarm keeps a stuck API call from hanging `wt`.
+iterm_session_table() {
+  pgrep -xq iTerm2 2>/dev/null || return 1
+  local it2; it2=$(it2_bin) || return 1
+  local f="$WT_FS"
+  perl -e 'alarm shift; exec @ARGV or exit 1' 5 \
+    "$it2" session list --format "\\(id)$f\\(tty)$f\\(path)$f\\(user.wt_worktree)$f\\(status)" \
+    2>/dev/null
+}
+
+# Print "id<TAB>status" for every iTerm2 session sitting in $1, or below it.
+# This finds the tab `wt` opened for a worktree, by its tag, as well as any
+# the user opened by hand. status is empty when it is not known. Silent when
+# iTerm2 is not running - and it is asked whether it is running rather than
+# told anything, so this never launches it.
 iterm_sessions_in() {
   local dir="$1"
+
+  local table
+  if table=$(iterm_session_table) && [[ -n "$table" ]]; then
+    local id tty tag status
+    while IFS="$WT_FS" read -r id tty _ tag status; do
+      [[ -n "$id" ]] || continue
+      if [[ "$tag" == "$dir" ]] || { [[ -n "$tty" ]] && tty_is_in "$tty" "$dir"; }; then
+        printf '%s\t%s\n' "$id" "$status"
+      fi
+    done <<< "$table"
+    return 0
+  fi
+
+  # Without it2, AppleScript can still list the sessions, though not their
+  # tags or status.
   local sessions
   sessions=$(osascript 2>/dev/null <<'APPLESCRIPT'
 if application "iTerm2" is running then
@@ -306,7 +363,7 @@ focus_existing_tab() {
 
   local self="${ITERM_SESSION_ID#*:}"
   local id
-  while read -r id; do
+  while read -r id _; do
     [[ -n "$id" && "$id" != "$self" ]] || continue
     focus_iterm_session "$id" && return 0
   done < <(iterm_sessions_in "$dir")
@@ -1463,6 +1520,44 @@ menu_init() {
     w=56
   fi
   WT_BRANCH_WIDTH="$w"
+
+  WT_SESSION_TABLE=$(iterm_session_table || true)
+}
+
+# What the iTerm2 tabs in worktree $1 are doing, from the table menu_init
+# loaded: a tab `wt` opened is matched by its tag, any other by the directory
+# its shell last reported. When several tabs are in it, the one that most
+# needs you wins. Nothing when no tab is in it, or iTerm2 could not be asked.
+WT_SESSION_TABLE=""
+tab_mark() {
+  local wt_path="$1"
+  [[ -n "$WT_SESSION_TABLE" ]] || return 0
+
+  local id tty path tag status rank best=0
+  while IFS="$WT_FS" read -r id tty path tag status; do
+    [[ -n "$id" ]] || continue
+    if [[ -n "$tag" ]]; then
+      [[ "$tag" == "$wt_path" ]] || continue
+    else
+      [[ "$path" == "$wt_path" || "$path" == "$wt_path/"* ]] || continue
+    fi
+    case "$status" in
+      waiting) rank=4 ;;
+      error)   rank=3 ;;
+      working) rank=2 ;;
+      *)       rank=1 ;;
+    esac
+    if (( rank > best )); then
+      best=$rank
+    fi
+  done <<< "$WT_SESSION_TABLE"
+
+  case "$best" in
+    4) paint 35 "[claude waiting for you]" ;;
+    3) paint 31 "[claude error]" ;;
+    2) paint 34 "[claude working]" ;;
+    1) paint 90 "[tab open]" ;;
+  esac
 }
 
 # Where the worktree sits - but only when that is worth a column. `wt` puts
@@ -1510,6 +1605,10 @@ worktree_menu_line() {
     fi
   else
     marks="$marks $(paint 90 "[missing, stale entry]")"
+  fi
+  mark=$(tab_mark "$wt_path")
+  if [[ -n "$mark" ]]; then
+    marks="$marks $mark"
   fi
   if [[ "$wt_path" == "$here" ]]; then
     marks="$marks $(paint 36 "[$current_label]")"
@@ -1612,12 +1711,26 @@ remove_one_worktree() {
   # Collected before the directory goes, while iTerm2 can still say which of
   # its tabs are sitting in it.
   local -a tabs=()
-  local session_id
-  if [[ "${WT_KEEP_TABS:-0}" != "1" ]]; then
-    while read -r session_id; do
-      [[ -n "$session_id" ]] || continue
+  local session_id status working=0
+  while read -r session_id status; do
+    [[ -n "$session_id" ]] || continue
+    if [[ "$status" == "working" ]]; then
+      working=1
+    fi
+    if [[ "${WT_KEEP_TABS:-0}" != "1" ]]; then
       tabs[${#tabs[@]}]="$session_id"
-    done < <(iterm_sessions_in "$wt_path")
+    fi
+  done < <(iterm_sessions_in "$wt_path")
+
+  # A claude still in the middle of a turn is about to have its tree pulled
+  # out from under it, and whatever it was doing lost. Known only through
+  # iTerm2's Claude Code integration; without it, nothing is reported here.
+  if (( working )); then
+    read -r -p "Claude is still working in '$branch'. Remove it anyway? [y/N] " yn || yn="n"
+    if [[ ! "$yn" =~ ^[Yy]$ ]]; then
+      echo "Skipping '$branch'."
+      return
+    fi
   fi
 
   # A worktree whose directory is already gone is just a stale registration.
