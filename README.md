@@ -6,9 +6,11 @@ rebuilding, or losing your place.
 `wt` creates a worktree, names its branch after a GitHub issue or a Jira ticket
 (or checks out a pull request's branch), stores it in one central folder, and
 opens it in a new iTerm2 tab with Claude Code already running — seeded with a
-link to the issue, ticket or pull request. Picking, reopening and removing
-worktrees all go through an `fzf` picker, which shows each worktree's pull
-request and where it stands — merged ones flagged green, so finished work is
+link to the issue, ticket or pull request. Run plain `wt` and one `fzf` picker
+holds everything: a tab each for issues, pull requests, Jira tickets and
+worktrees, where <kbd>Enter</kbd> takes you to the work — creating its worktree
+first if there isn't one yet — and each worktree shows its pull request and
+what the `claude` in it is doing, merged ones flagged green so finished work is
 easy to clear away.
 
 ```
@@ -67,16 +69,56 @@ tag first — `git checkout v0.1.0 && ./build` — and `wt --version` will say s
 
 ## Commands
 
+### `wt` — the picker
+
+```sh
+wt                      # open the picker on the Issues tab
+```
+
+```
+╭  Issues 12    Pull requests 11    Jira 4    Worktrees 15   ────────────────────╮
+│ issues >                                                                      │
+│   tab next view · enter open or create · alt-m only mine · esc quit           │
+│ ▌ #242                OTLP gateway dashboard: traffic in does not match…      │
+│   #187    [waiting]   VB365 controller log lines are ingested more than once  │
+│   #186                Recording rules for the VB365 Tenant Sessions trend…    │
+╰───────────────────────────────────────────────────────────────────────────────╯
+```
+
+| Key | What it does |
+|---|---|
+| <kbd>Tab</kbd> / <kbd>⇧Tab</kbd> | Next / previous tab: Issues, Pull requests, Jira (when set up), Worktrees |
+| <kbd>Enter</kbd> | Go to it: switch to the worktree's iTerm2 tab, or open one — and for an issue, pull request or ticket with no worktree yet, create it first, exactly as `wt new` does |
+| <kbd>alt-m</kbd> | Only mine: issues assigned to you, pull requests you opened, tickets assigned to you. Press again for everyone's |
+| <kbd>ctrl-space</kbd> | Mark a worktree, to remove several at once |
+| <kbd>ctrl-x</kbd> | On the Worktrees tab: remove the marked worktrees, or the one under the cursor, with the same questions as `wt rm`; then back to the picker |
+| <kbd>Esc</kbd> | Quit |
+
+Issues, pull requests and tickets that have a worktree carry a mark saying so:
+`[worktree]`, or — once iTerm2 can tell — what its tab is doing: `[waiting]`
+for a `claude` waiting on you, `[working]`, `[tab open]`. Type `waiting` to see
+just those. The Worktrees tab is the list described under `wt list` below.
+
+Every source starts loading in the background the moment the picker opens, so
+by the time you press <kbd>Tab</kbd> its list is usually there already; each
+is fetched once per run, and the counts fill in on the tab strip as they
+arrive. A source that fails says why in its own tab — a Jira token that has
+been rejected, say — without holding up the others.
+
+`wt new`, `wt list` and `wt open` with nothing named open this same picker, on
+the tab they're about. Without fzf there are no tabs, and each command falls
+back to its own numbered menu.
+
 ### `wt new` — create a worktree
 
 ```sh
-wt new                  # pick an open issue from a list
+wt new                  # the picker, on the Issues tab
 wt new --mine           # ...only issues assigned to you
 wt new 1234             # branch from issue #1234 directly
-wt new --pr             # pick an open pull request and check out its branch
+wt new --pr             # the picker, on the Pull requests tab
 wt new --pr --mine      # ...only pull requests you opened
 wt new --pr 1240        # check out pull request #1240 directly
-wt new --jira           # pick an open Jira ticket
+wt new --jira           # the picker, on the Jira tab
 wt new --jira --mine    # ...only tickets assigned to you
 wt new SRE-1234         # branch from Jira ticket SRE-1234 directly
 wt new <link>           # any of the above from a pasted GitHub issue or pull
@@ -101,7 +143,7 @@ leaves it exactly as it was. Either way the new worktree is cut from
 without touching the local branch.
 
 Issues that already have a worktree are flagged `[worktree]` in the
-picker. Picking one anyway is fine — `wt new` opens the existing worktree
+picker (or with what their tab is doing, as above). Picking one anyway is fine — `wt new` opens the existing worktree
 instead of failing. The match is on the issue number rather than the whole
 branch name, so an issue renamed since its worktree was created still reopens
 that worktree instead of starting a second one under the new slug. If only the
@@ -168,7 +210,7 @@ that it is an ordinary branch name. `wt new --jira abc-123` is never ambiguous.
 ### `wt list` — reopen a worktree
 
 ```sh
-wt list                 # pick a worktree, switch to its tab (or open one)
+wt list                 # the picker, on the Worktrees tab
 wt list --plain         # plain `git worktree list` output instead
 ```
 

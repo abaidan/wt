@@ -7,6 +7,8 @@
 # it in a new iTerm2 tab with `claude` running.
 #
 # Usage:
+#   wt                        The picker: issues, pull requests, Jira tickets and
+#                             worktrees, a tab each
 #   wt new                    Pick an open GitHub issue from a list, then branch from it
 #   wt new --mine             Same, narrowed to issues assigned to you
 #   wt new <issue-number>     Create a worktree/branch named after GitHub issue #<n>
@@ -548,14 +550,6 @@ require_gh() {
   command -v gh >/dev/null 2>&1 || die "gh CLI not found. Install with 'brew install gh' and run 'gh auth login', or pass a branch name instead."
 }
 
-# Branch and directory names of the repo's worktrees, one per line, so a
-# picker can flag what is already checked out somewhere. The directory counts
-# too: it keeps an issue's name after the branch inside it has been switched
-# to something else.
-worktree_names() {
-  list_worktrees "$1" 0 | awk -F'\t' '{ n = split($1, d, "/"); print $2; print d[n] }'
-}
-
 # The repo's "owner/name" on GitHub, for picker headers; the directory name
 # when gh cannot say.
 github_label() {
@@ -578,7 +572,7 @@ pick_from_menu() {
   if have_fzf; then
     local sel
     sel=$(printf '%s' "$menu" | fzf \
-      --delimiter=$'\t' --with-nth=2.. \
+      --delimiter=$'\t' --with-nth=2.. --ansi \
       --height=90% --border --reverse --no-multi \
       --prompt="$prompt" \
       --header="$label: $count open   (type to filter, enter to pick, esc to cancel)" \
@@ -612,23 +606,140 @@ menu_details() {
 # "<number><TAB><title><TAB><url>" - the title and URL empty for a number
 # typed into the fallback menu that was not in the list. Prints nothing if
 # the user cancels.
-pick_issue() {
+# The open issues, as "<number><TAB><title><TAB><url>" lines. The limit is
+# high enough to take in every open issue on most repos, so that typing in fzf
+# searches all of them rather than only the newest page; gh pages through the
+# API 100 at a time to get there.
+fetch_issues() {
   local root="$1" only_mine="$2"
-  require_gh
-
-  # High enough to take in every open issue on most repos, so that typing in
-  # fzf searches all of them rather than only the newest page; gh pages
-  # through the API 100 at a time to get there.
   local -a gh_args=(issue list --state open --limit "${WT_ISSUE_LIMIT:-1000}")
   if [[ "$only_mine" == "1" ]]; then
     gh_args[${#gh_args[@]}]="--assignee"
     gh_args[${#gh_args[@]}]="@me"
   fi
+  (cd "$root" && gh "${gh_args[@]}" --json number,title,url \
+     --jq '.[] | [.number, .title, .url] | @tsv')
+}
+
+# The open pull requests, as "<number><TAB><head branch><TAB><title>" lines.
+fetch_prs() {
+  local root="$1" only_mine="$2"
+  local -a gh_args=(pr list --state open --limit "${WT_ISSUE_LIMIT:-1000}")
+  if [[ "$only_mine" == "1" ]]; then
+    gh_args[${#gh_args[@]}]="--author"
+    gh_args[${#gh_args[@]}]="@me"
+  fi
+  (cd "$root" && gh "${gh_args[@]}" --json number,title,headRefName,isDraft \
+     --jq '.[] | [.number, .headRefName, (if .isDraft then "[draft] " else "" end) + .title] | @tsv')
+}
+
+# "<name><TAB><path>" for the branch and the directory name of every linked
+# worktree, as a string wrapped in newlines for map_get to search.
+worktree_name_map() {
+  local m
+  m=$(list_worktrees "$1" 0 | awk -F'\t' '{ n = split($1, d, "/"); print $2 "\t" $1; print d[n] "\t" $1 }')
+  printf '\n%s\n' "$m"
+}
+
+# Look $2 up in a map from worktree_name_map (or one shaped like it), leaving
+# the path in MAP_VAL. Pure bash, so a list of hundreds of issues does not pay
+# for a process per line.
+MAP_VAL=""
+map_get() {
+  local map="$1" key="$2"
+  local rest="${map#*$'\n'"$key"$'\t'}"
+  [[ "$rest" != "$map" ]] || return 1
+  MAP_VAL="${rest%%$'\n'*}"
+}
+
+# The mark an issue, pull request or ticket carries when worktree $1 is its:
+# "[worktree]", or what the iTerm2 tab in it is doing, ten columns wide.
+item_mark() {
+  case "$(tab_state "$1")" in
+    4) paint 35 "[waiting] " ;;
+    3) paint 31 "[error]   " ;;
+    2) paint 34 "[working] " ;;
+    1) paint 90 "[tab open]" ;;
+    *) paint 36 "[worktree]" ;;
+  esac
+}
+
+# Menu lines "<id><TAB><display>" for the raw lines of fetch_issues ($2).
+#
+# The mark sits between the number and the title, never after the title: fzf
+# gives the list only about half the width next to the preview, so anything
+# past a padded title is cut off the edge of the screen in most terminals.
+#
+# An issue has a worktree by the same rule as find_worktree_for_issue: a
+# branch or directory named "<n>" or "<n>-anything", so a branch named after
+# an issue whose title slugs to nothing still counts.
+issue_rows() {
+  local root="$1" raw="$2"
+  [[ -n "$WT_SESSION_TABLE" ]] || WT_SESSION_TABLE=$(iterm_session_table || true)
+  local map
+  map=$'\n'$(worktree_name_map "$root" \
+    | awk -F'\t' 'match($1, /^[0-9]+(-|$)/) { k = $1; sub(/-.*/, "", k); print k "\t" $2 }')$'\n'
+  local n title url mark
+  while IFS=$'\t' read -r n title url; do
+    [[ -n "$n" ]] || continue
+    mark="          "
+    if map_get "$map" "$n"; then
+      mark=$(item_mark "$MAP_VAL")
+    fi
+    (( ${#title} <= 64 )) || title="${title:0:61}..."
+    printf '%s\t#%-6s %s  %s\n' "$n" "$n" "$mark" "$title"
+  done <<< "$raw"
+}
+
+# Menu lines for the raw lines of fetch_prs ($2). A pull request has a
+# worktree when its branch is checked out, or a worktree directory carries the
+# branch's name, as new_pr_worktree names it - with "pr-<n>-" in front for one
+# from a fork.
+pr_rows() {
+  local root="$1" raw="$2"
+  [[ -n "$WT_SESSION_TABLE" ]] || WT_SESSION_TABLE=$(iterm_session_table || true)
+  local map; map=$(worktree_name_map "$root")
+  local n head title mark dir
+  while IFS=$'\t' read -r n head title; do
+    [[ -n "$n" ]] || continue
+    mark="          "
+    dir="${head//\//-}"
+    if map_get "$map" "$head" || map_get "$map" "$dir" || map_get "$map" "pr-$n-$dir"; then
+      mark=$(item_mark "$MAP_VAL")
+    fi
+    (( ${#title} <= 64 )) || title="${title:0:61}..."
+    printf '%s\t#%-6s %s  %s\n' "$n" "$n" "$mark" "$title"
+  done <<< "$raw"
+}
+
+# Menu lines for Jira's "<KEY><TAB><summary>" lines ($2). Same rule as for
+# issues: a ticket has a worktree when a branch or directory is "<KEY>" or
+# "<KEY>-anything".
+jira_rows() {
+  local root="$1" raw="$2"
+  [[ -n "$WT_SESSION_TABLE" ]] || WT_SESSION_TABLE=$(iterm_session_table || true)
+  local map
+  map=$'\n'$(worktree_name_map "$root" \
+    | awk -F'\t' 'match($1, /^[A-Z][A-Z0-9_]+-[0-9]+(-|$)/) { k = substr($1, 1, RLENGTH); sub(/-$/, "", k); print k "\t" $2 }')$'\n'
+  local key title mark
+  while IFS=$'\t' read -r key title; do
+    [[ -n "$key" ]] || continue
+    mark="          "
+    if map_get "$map" "$key"; then
+      mark=$(item_mark "$MAP_VAL")
+    fi
+    (( ${#title} <= 64 )) || title="${title:0:61}..."
+    printf '%s\t%-11s %s  %s\n' "$key" "$key" "$mark" "$title"
+  done <<< "$raw"
+}
+
+pick_issue() {
+  local root="$1" only_mine="$2"
+  require_gh
 
   echo "Fetching open issues..." >&2
   local raw
-  raw=$(cd "$root" && gh "${gh_args[@]}" --json number,title,url \
-          --jq '.[] | [.number, .title, .url] | @tsv' 2>&1) \
+  raw=$(fetch_issues "$root" "$only_mine" 2>&1) \
     || die "could not list issues via gh: $raw"
 
   if [[ -z "$raw" ]]; then
@@ -638,25 +749,7 @@ pick_issue() {
     die "no open issues found for this repo"
   fi
 
-  # The mark sits between the number and the title, never after the title: fzf
-  # gives the list only about half the width next to the preview, so anything
-  # past a padded title is cut off the edge of the screen in most terminals.
-  #
-  # The issue numbers that have a worktree are collected once, up front, as
-  # " 12 34 ": with hundreds of issues, a grep per line costs seconds.
-  # Same rule as find_worktree_for_issue: "<n>" or "<n>-anything", so a
-  # branch named after an issue whose title slugs to nothing still counts.
-  local have_wt=" "
-  have_wt+=$(worktree_names "$root" | sed -nE 's/^([0-9]+)(-.*)?$/\1/p' | tr '\n' ' ')
-  local n title url mark line menu=""
-  while IFS=$'\t' read -r n title url; do
-    [[ -n "$n" ]] || continue
-    mark=""
-    [[ "$have_wt" != *" $n "* ]] || mark="[worktree]"
-    (( ${#title} <= 64 )) || title="${title:0:61}..."
-    printf -v line '%s\t#%-6s %-10s  %s' "$n" "$n" "$mark" "$title"
-    menu+="$line"$'\n'
-  done <<< "$raw"
+  local menu; menu=$(issue_rows "$root" "$raw")
 
   local reply
   reply=$(pick_from_menu "$menu" "$(github_label "$root")" issues 'issue > ' \
@@ -673,16 +766,9 @@ pick_pr() {
   local root="$1" only_mine="$2"
   require_gh
 
-  local -a gh_args=(pr list --state open --limit "${WT_ISSUE_LIMIT:-1000}")
-  if [[ "$only_mine" == "1" ]]; then
-    gh_args[${#gh_args[@]}]="--author"
-    gh_args[${#gh_args[@]}]="@me"
-  fi
-
   echo "Fetching open pull requests..." >&2
   local raw
-  raw=$(cd "$root" && gh "${gh_args[@]}" --json number,title,headRefName,isDraft \
-          --jq '.[] | [.number, .headRefName, (if .isDraft then "[draft] " else "" end) + .title] | @tsv' 2>&1) \
+  raw=$(fetch_prs "$root" "$only_mine" 2>&1) \
     || die "could not list pull requests via gh: $raw"
 
   if [[ -z "$raw" ]]; then
@@ -692,24 +778,7 @@ pick_pr() {
     die "no open pull requests found for this repo"
   fi
 
-  # A pull request has a worktree when its branch is checked out, or a
-  # worktree directory carries the branch's name, as new_pr_worktree names it
-  # - with "pr-<n>-" in front for one from a fork.
-  local have_wt
-  have_wt=$'\n'$(worktree_names "$root")$'\n'
-  local n head title mark line menu="" dir
-  while IFS=$'\t' read -r n head title; do
-    [[ -n "$n" ]] || continue
-    mark=""
-    dir="${head//\//-}"
-    if [[ "$have_wt" == *$'\n'"$head"$'\n'* || "$have_wt" == *$'\n'"$dir"$'\n'* \
-          || "$have_wt" == *$'\n'"pr-$n-$dir"$'\n'* ]]; then
-      mark="[worktree]"
-    fi
-    (( ${#title} <= 64 )) || title="${title:0:61}..."
-    printf -v line '%s\t#%-6s %-10s  %s' "$n" "$n" "$mark" "$title"
-    menu+="$line"$'\n'
-  done <<< "$raw"
+  local menu; menu=$(pr_rows "$root" "$raw")
 
   local reply
   reply=$(pick_from_menu "$menu" "$(github_label "$root")" "pull requests" 'pr > ' \
@@ -862,19 +931,7 @@ pick_jira_ticket() {
   raw=$(jira_search "$(jira_picker_jql "$only_mine")") || exit 1
   [[ -n "$raw" ]] || die "no open Jira tickets match: $(jira_picker_jql "$only_mine")"
 
-  # Same rule as for issues: a ticket has a worktree when a branch or
-  # directory is "<KEY>" or "<KEY>-anything".
-  local have_wt=" "
-  have_wt+=$(worktree_names "$root" | sed -nE 's/^([A-Z][A-Z0-9_]+-[0-9]+)(-.*)?$/\1/p' | tr '\n' ' ')
-  local key title mark line menu=""
-  while IFS=$'\t' read -r key title; do
-    [[ -n "$key" ]] || continue
-    mark=""
-    [[ "$have_wt" != *" $key "* ]] || mark="[worktree]"
-    (( ${#title} <= 64 )) || title="${title:0:61}..."
-    printf -v line '%s\t%-11s %-10s  %s' "$key" "$key" "$mark" "$title"
-    menu+="$line"$'\n'
-  done <<< "$raw"
+  local menu; menu=$(jira_rows "$root" "$raw")
 
   local label="Jira"
   [[ -z "${WT_JIRA_PROJECT:-}" ]] || label="Jira $WT_JIRA_PROJECT"
@@ -1099,6 +1156,16 @@ cmd_new() {
     esac
   done
 
+  # Nothing named: the picker, opened on the tab for what was asked for.
+  if [[ -z "$arg" ]] && have_fzf; then
+    case "$source" in
+      pr)   cmd_ui prs "$only_mine" ;;
+      jira) require_jira; jira_check_login; cmd_ui jira "$only_mine" ;;
+      *)    cmd_ui issues "$only_mine" ;;
+    esac
+    return
+  fi
+
   local root repo base
   root=$(repo_root)
   repo=$(repo_name)
@@ -1322,7 +1389,7 @@ cmd_list() {
     git -C "$root" worktree list
     return
   fi
-  pick_worktree_and_open "$root"
+  cmd_ui worktrees 0
 }
 
 # Print "path<TAB>branch" for a worktree whose branch or directory is named
@@ -1351,7 +1418,7 @@ cmd_open() {
   local branch="${1:-}"
   local root; root=$(repo_root)
   if [[ -z "$branch" ]]; then
-    pick_worktree_and_open "$root"
+    cmd_ui worktrees 0
     return
   fi
   local wt_path; wt_path=$(find_worktree_path "$root" "$branch")
@@ -1529,9 +1596,12 @@ menu_init() {
 # its shell last reported. When several tabs are in it, the one that most
 # needs you wins. Nothing when no tab is in it, or iTerm2 could not be asked.
 WT_SESSION_TABLE=""
-tab_mark() {
+tab_state() {
   local wt_path="$1"
-  [[ -n "$WT_SESSION_TABLE" ]] || return 0
+  if [[ -z "$WT_SESSION_TABLE" ]]; then
+    echo 0
+    return 0
+  fi
 
   local id tty path tag status rank best=0
   while IFS="$WT_FS" read -r id tty path tag status; do
@@ -1551,8 +1621,11 @@ tab_mark() {
       best=$rank
     fi
   done <<< "$WT_SESSION_TABLE"
+  echo "$best"
+}
 
-  case "$best" in
+tab_mark() {
+  case "$(tab_state "$1")" in
     4) paint 35 "[claude waiting for you]" ;;
     3) paint 31 "[claude error]" ;;
     2) paint 34 "[claude working]" ;;
@@ -1907,11 +1980,399 @@ rm_menu_round() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# The picker `wt` opens: one fzf session with a tab per source - issues, pull
+# requests, Jira tickets, worktrees - switched with tab / shift-tab. Enter does
+# the obvious thing wherever it is pressed: switch to the worktree, or create
+# it first.
+#
+# fzf calls back into this script (`wt __ui <action>`) to fill the list, to
+# switch tabs and to act on rows, and keeps nothing between those calls but
+# what is in the directory $WT_UI: which tab is showing, whether "mine" is on,
+# and each source's fetched lines, so that a tab already seen comes back
+# without asking the network again. Every row is "<kind><TAB><id><TAB>..." -
+# kind is issue, pr, jira, wt or msg - and fzf shows fields 3 onwards.
+# ---------------------------------------------------------------------------
+
+ui_get() { cat "$WT_UI/$1" 2>/dev/null || true; }
+ui_set() { printf '%s' "$2" > "$WT_UI/$1"; }
+
+# The tabs on offer, in order: the GitHub ones when gh is there, Jira when it
+# is set up, and always the worktrees.
+ui_tabs() {
+  local t=""
+  if command -v gh >/dev/null 2>&1; then
+    t="issues prs"
+  fi
+  if jira_enabled; then
+    t="$t jira"
+  fi
+  t="$t worktrees"
+  echo "${t# }"
+}
+
+ui_title() {
+  case "$1" in
+    issues)    echo "Issues" ;;
+    prs)       echo "Pull requests" ;;
+    jira)      echo "Jira" ;;
+    worktrees) echo "Worktrees" ;;
+  esac
+}
+
+# How many rows tab $1 has, when that is known without waiting for anything.
+ui_count() {
+  local tab="$1" f
+  if [[ "$tab" == "worktrees" ]]; then
+    list_worktrees "$(ui_get root)" 1 | grep -c '' || true
+    return 0
+  fi
+  f="$WT_UI/raw-$tab-$(ui_get mine)"
+  [[ -f "$f" ]] || return 0
+  grep -c . "$f" || true
+}
+
+# The tab strip, shown in the top border: the tab showing in reverse, the
+# rest dimmed, each with its count once that is known.
+ui_strip() {
+  local current; current=$(ui_get tab)
+  local tab n text out=" "
+  for tab in $(ui_get tabs); do
+    text="$(ui_title "$tab")"
+    n=$(ui_count "$tab")
+    [[ -z "$n" ]] || text="$text $n"
+    if [[ "$tab" == "$current" ]]; then
+      out="$out$(paint '1;7' " $text ")  "
+    else
+      out="$out$(paint 90 " $text ")  "
+    fi
+  done
+  if [[ "$(ui_get mine)" == "1" ]]; then
+    out="$out$(paint 33 "[mine]") "
+  fi
+  printf '%s' "$out"
+}
+
+ui_prompt() { printf '%s > ' "$(ui_get tab)"; }
+
+ui_hints() {
+  if [[ "$(ui_get tab)" == "worktrees" ]]; then
+    echo "tab next view · enter open · ctrl-space mark · ctrl-x remove · esc quit"
+  else
+    echo "tab next view · enter open or create · alt-m only mine · esc quit"
+  fi
+}
+
+# The fzf actions that redraw everything after the tab or "mine" changed. The
+# strip goes last because it holds escape codes, whose "[" no bracket pair
+# could contain; the colon form takes the rest of the line as it is.
+ui_redraw_actions() {
+  local self; self=$(printf '%q' "$WT_SELF")
+  printf 'clear-selection+reload(%s __ui rows)+change-prompt(%s)+change-header(%s)+change-border-label:%s' \
+    "$self" "$(ui_prompt)" "$(ui_hints)" "$(ui_strip)"
+}
+
+# Fetch source $1's lines for "mine" $2 into $WT_UI/raw-$1-$2, or leave why
+# not in raw-$1-$2.err. The .pending marker tells ui_raw a fetch is under way.
+ui_fetch_to() {
+  local src="$1" mine="$2" root="$3"
+  local f="$WT_UI/raw-$src-$mine" out
+  if out=$(ui_fetch "$src" "$mine" "$root" 2>"$f.stderr"); then
+    printf '%s\n' "$out" > "$f.tmp" && mv "$f.tmp" "$f"
+  else
+    grep . "$f.stderr" | head -3 > "$f.err" || true
+    [[ -s "$f.err" ]] || echo "could not list $(ui_title "$src" | tr '[:upper:]' '[:lower:]')" > "$f.err"
+  fi
+  rm -f "$f.pending" "$f.stderr"
+}
+
+ui_fetch() {
+  local src="$1" mine="$2" root="$3"
+  case "$src" in
+    issues) fetch_issues "$root" "$mine" ;;
+    prs)    fetch_prs "$root" "$mine" ;;
+    # Jira answers a search with rejected credentials as if from an
+    # anonymous visitor - with nothing - so the login is checked first.
+    jira)   jira_check_login && jira_search "$(jira_picker_jql "$mine")" ;;
+  esac
+}
+
+# Print source $1's lines for "mine" $2: from the cache, from a fetch already
+# under way (waited for), or fetched now. Fails, with the reason printed, when
+# the fetch did.
+ui_raw() {
+  local src="$1" mine="$2" root="$3"
+  local f="$WT_UI/raw-$src-$mine" tries=0
+  while [[ -f "$f.pending" && ! -f "$f" && ! -f "$f.err" ]] && (( tries < 600 )); do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  if [[ ! -f "$f" && ! -f "$f.err" ]]; then
+    ui_fetch_to "$src" "$mine" "$root"
+  fi
+  if [[ -f "$f.err" ]]; then
+    cat "$f.err"
+    return 1
+  fi
+  cat "$f"
+}
+
+# Look up the pull request labels of the worktrees into $WT_UI/pr-index.
+ui_pr_index_build() {
+  local root="$1" f="$WT_UI/pr-index"
+  local -a branches=()
+  local p b
+  while IFS=$'\t' read -r p b; do
+    [[ -n "$p" ]] || continue
+    branches[${#branches[@]}]="$b"
+  done < <(list_worktrees "$root" 1)
+  pr_index_load "$root" ${branches[@]+"${branches[@]}"} 2>/dev/null || true
+  printf '%s' "$WT_PR_INDEX" > "$f.tmp" && mv "$f.tmp" "$f"
+  rm -f "$f.pending"
+}
+
+# The pull request labels of the worktrees, looked up once per picker: from
+# the lookup started in the background, or now.
+ui_pr_index() {
+  local root="$1" f="$WT_UI/pr-index" tries=0
+  while [[ -f "$f.pending" && ! -f "$f" ]] && (( tries < 600 )); do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  [[ -f "$f" ]] || ui_pr_index_build "$root"
+  cat "$f"
+}
+
+# A row that only says something; enter and ctrl-x pass over it.
+ui_msg() { printf 'msg\t\t%s\n' "$(paint "${2:-90}" "$1")"; }
+
+# `wt __ui rows`: the rows of the tab showing.
+ui_rows() {
+  local root tab mine
+  root=$(ui_get root)
+  tab=$(ui_get tab)
+  mine=$(ui_get mine)
+  WT_COLOR=$(ui_get color)
+  WT_SESSION_TABLE=$(iterm_session_table || true)
+
+  if [[ "$tab" == "worktrees" ]]; then
+    local -a paths=() branches=()
+    local path branch
+    while IFS=$'\t' read -r path branch; do
+      [[ -n "$path" ]] || continue
+      paths[${#paths[@]}]="$path"
+      branches[${#branches[@]}]="$branch"
+    done < <(list_worktrees "$root" 1)
+    WT_PR_INDEX=$(ui_pr_index "$root")
+    menu_init "$root" ${branches[@]+"${branches[@]}"}
+    local here i
+    here=$(ui_get here)
+    for i in "${!paths[@]}"; do
+      printf 'wt\t%s\n' "$(worktree_menu_line "$i" "${paths[$i]}" "${branches[$i]}" "$here" | cut -f2-)"
+    done
+    return 0
+  fi
+
+  local raw kind rows
+  if ! raw=$(ui_raw "$tab" "$mine" "$root"); then
+    while IFS= read -r line; do
+      ui_msg "$line" 31
+    done <<< "$raw"
+    return 0
+  fi
+  case "$tab" in
+    issues) kind="issue"; rows=$(issue_rows "$root" "$raw") ;;
+    prs)    kind="pr";    rows=$(pr_rows "$root" "$raw") ;;
+    jira)   kind="jira";  rows=$(jira_rows "$root" "$raw") ;;
+  esac
+  if [[ -z "$rows" ]]; then
+    if [[ "$mine" == "1" ]]; then
+      ui_msg "Nothing open of yours here (alt-m shows everyone's)"
+    else
+      ui_msg "Nothing open here"
+    fi
+    return 0
+  fi
+  printf '%s\n' "$rows" | sed "s/^/$kind$(printf '\t')/"
+}
+
+# `wt __ui switch 1|-1`: move to the next or previous tab.
+ui_switch() {
+  local step="${1:-1}"
+  local -a tabs=()
+  local t i=0 at=0
+  for t in $(ui_get tabs); do
+    tabs[${#tabs[@]}]="$t"
+    [[ "$t" != "$(ui_get tab)" ]] || at=$i
+    i=$((i + 1))
+  done
+  at=$(( (at + step + ${#tabs[@]}) % ${#tabs[@]} ))
+  ui_set tab "${tabs[$at]}"
+  WT_COLOR=$(ui_get color)
+  ui_redraw_actions
+}
+
+# `wt __ui mine`: show only your own issues, pull requests and tickets, or
+# everyone's again.
+ui_mine() {
+  if [[ "$(ui_get mine)" == "1" ]]; then
+    ui_set mine 0
+  else
+    ui_set mine 1
+  fi
+  WT_COLOR=$(ui_get color)
+  ui_redraw_actions
+}
+
+# `wt __ui rm-key`: what ctrl-x does - remove the marked worktrees, or the one
+# under the cursor, but only on the worktrees tab.
+ui_rm_key() {
+  [[ "$(ui_get tab)" == "worktrees" ]] || return 0
+  local self; self=$(printf '%q' "$WT_SELF")
+  printf 'execute(%s __ui rm {+f})+clear-selection+reload(%s __ui rows)' "$self" "$self"
+}
+
+# `wt __ui rm <file>`: remove the worktrees on the rows listed in the file,
+# asking what remove_one_worktree asks, then wait for a key so the outcome can
+# be read before fzf draws over it.
+ui_rm() {
+  local file="$1" root main kind path rest branch n=0
+  root=$(ui_get root)
+  main=$(main_worktree "$root")
+  # fzf leaves its list on screen under a command it runs; clear it first, so
+  # the questions are not printed over the rows.
+  printf '\033[H\033[J'
+  while IFS=$'\t' read -r kind path rest; do
+    [[ "$kind" == "wt" && -n "$path" ]] || continue
+    n=$((n + 1))
+    echo
+    if [[ "$path" == "$main" ]]; then
+      echo "Skipping the main working tree: it cannot be removed."
+      continue
+    fi
+    branch=$(list_worktrees "$root" 0 | awk -F'\t' -v p="$path" '$1 == p { print $2; exit }')
+    ( remove_one_worktree "$path" "${branch:-(detached)}" ) < /dev/tty || true
+  done < "$file"
+  (( n > 0 )) || return 0
+  echo
+  read -r -s -n 1 -p "Press any key to go back to the picker." < /dev/tty || true
+}
+
+# `wt __ui preview <kind> <id>`
+ui_preview() {
+  local kind="$1" id="${2:-}" root
+  root=$(ui_get root)
+  case "$kind" in
+    wt)    cmd_preview "$id" ;;
+    issue) (cd "$root" && GH_FORCE_TTY="${FZF_PREVIEW_COLUMNS:-80}" gh issue view "$id" 2>&1) ;;
+    pr)    (cd "$root" && GH_FORCE_TTY="${FZF_PREVIEW_COLUMNS:-80}" gh pr view "$id" 2>&1) ;;
+    jira)  cmd_jira_preview "$id" ;;
+  esac
+}
+
+# `wt __ui go <kind> <id>`: what enter does, run in place of fzf once it
+# closes. Everything but a worktree goes through `wt new`, which switches to
+# the worktree when there already is one.
+ui_go() {
+  local kind="$1" id="${2:-}"
+  case "$kind" in
+    wt)
+      [[ -d "$id" ]] \
+        || die "$(short_path "$id") no longer exists (stale worktree; clear it with ctrl-x)"
+      echo "Opening $(short_path "$id")"
+      open_worktree "$id"
+      ;;
+    issue) cmd_new "$id" ;;
+    pr)    cmd_new --pr "$id" ;;
+    jira)  cmd_new --jira "$id" ;;
+  esac
+}
+
+# Open the picker on tab $1 ("issues", "prs", "jira" or "worktrees"), with
+# "mine" $2. Without fzf there are no tabs, and the numbered menu of that one
+# source is offered instead.
+cmd_ui() {
+  local tab="${1:-issues}" mine="${2:-0}"
+  local root; root=$(repo_root)
+
+  if ! have_fzf; then
+    case "$tab" in
+      worktrees) pick_worktree_and_open "$root" ;;
+      prs)       if (( mine )); then cmd_new --pr --mine; else cmd_new --pr; fi ;;
+      jira)      if (( mine )); then cmd_new --jira --mine; else cmd_new --jira; fi ;;
+      *)         if (( mine )); then cmd_new --mine; else cmd_new; fi ;;
+    esac
+    return
+  fi
+
+  local tabs; tabs=$(ui_tabs)
+  if [[ " $tabs " != *" $tab "* ]]; then
+    tab="${tabs%% *}"
+  fi
+
+  WT_UI=$(mktemp -d "${TMPDIR:-/tmp}/wt-ui.XXXXXX") || die "could not create a temporary directory"
+  export WT_UI
+  trap 'rm -rf "$WT_UI"' EXIT
+  ui_set root "$root"
+  ui_set tabs "$tabs"
+  ui_set tab "$tab"
+  ui_set mine "$mine"
+  ui_set color "$WT_COLOR"
+  ui_set here "$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
+  # Every source starts loading now, in the background, so that by the time
+  # a tab is switched to its list is usually there already.
+  local t
+  for t in $tabs; do
+    [[ "$t" != "worktrees" ]] || continue
+    : > "$WT_UI/raw-$t-$mine.pending"
+    ( ui_fetch_to "$t" "$mine" "$root" ) >/dev/null 2>&1 &
+  done
+  : > "$WT_UI/pr-index.pending"
+  ( ui_pr_index_build "$root" ) >/dev/null 2>&1 &
+
+  local self; self=$(printf '%q' "$WT_SELF")
+  fzf --ansi --multi --delimiter=$'\t' --with-nth=3.. \
+    --height=90% --border --reverse --border-label-pos=2 \
+    --prompt="$(ui_prompt)" --header="$(ui_hints)" --border-label="$(ui_strip)" \
+    --preview="$self __ui preview {1} {2}" --preview-window='right:48%:wrap' \
+    --bind="start:reload($self __ui rows)" \
+    --bind="load:transform-border-label($self __ui strip)" \
+    --bind="tab:transform($self __ui switch 1)" \
+    --bind="shift-tab:transform($self __ui switch -1)" \
+    --bind="ctrl-space:toggle" \
+    --bind="alt-m:transform($self __ui mine)" \
+    --bind="ctrl-x:transform($self __ui rm-key)" \
+    --bind="enter:become($self __ui go {1} {2})" \
+    < /dev/null || true
+}
+
+cmd_ui_action() {
+  [[ -n "${WT_UI:-}" && -d "$WT_UI" ]] || die "'wt __ui' is only for the picker to call"
+  local action="${1:-}"
+  shift || true
+  case "$action" in
+    rows)    ui_rows ;;
+    strip)   WT_COLOR=$(ui_get color); ui_strip ;;
+    switch)  ui_switch "$@" ;;
+    mine)    ui_mine ;;
+    rm-key)  ui_rm_key ;;
+    rm)      ui_rm "$@" ;;
+    preview) ui_preview "$@" ;;
+    go)      ui_go "$@" ;;
+    *)       die "unknown picker action '$action'" ;;
+  esac
+}
+
 usage() {
   cat <<'EOF'
 wt - git worktree helper with GitHub and Jira integration and iTerm2 automation
 
 Usage:
+  wt                      Open the picker: a tab each for issues, pull requests,
+                          Jira tickets and worktrees (tab switches; enter goes
+                          to the worktree, creating it if need be; alt-m only
+                          mine; ctrl-x removes a worktree, ctrl-space marks)
   wt new                  Pick an open GitHub issue from a list, then branch from it
   wt new --mine           Same, narrowed to issues assigned to you
   wt new <issue-number>   Create a worktree/branch named after GitHub issue #<n>
@@ -1973,7 +2434,9 @@ case "${1:-}" in
   __preview) shift; cmd_preview "$@" ;;
   __jira-preview) shift; cmd_jira_preview "$@" ;;
   __tab-title) shift; cmd_tab_title "$@" ;;
+  __ui) shift; cmd_ui_action "$@" ;;
   -V|--version|version) echo "wt $WT_VERSION" ;;
-  -h|--help|help|"") usage ;;
+  "") cmd_ui issues 0 ;;
+  -h|--help|help) usage ;;
   *) die "unknown command '$1' (see 'wt help')" ;;
 esac
