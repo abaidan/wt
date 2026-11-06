@@ -27,6 +27,8 @@
 #   wt rm [branch]            Remove a worktree; with no argument, pick from a list
 #   wt status [--json]        Every worktree across all repos, with its pull
 #                             request and what its claude is doing
+#   wt events [--wait]        What those claudes have been doing; --wait blocks
+#                             until one needs looking at
 #   wt --version              Print the installed version
 #
 # Env vars:
@@ -1961,6 +1963,123 @@ for my $r (@out) {
 }
 '
 
+# `wt events`, reading events.jsonl (see WT_HOOK_PL). A cursor is
+# "<inode>:<offset>" of that file, so a rotation to events.1.jsonl is noticed
+# and the rest of the old file read first. Each event is printed with the
+# cursor to carry on from; pass the last one back as --since. Without WT_WAIT,
+# every event since the cursor (by default, all of them) is printed.
+#
+# With WT_WAIT, block until a waking event arrives - a session waiting on the
+# user, one that finished a turn with no background work left, an error -
+# then give a burst 2 s to land, print it and exit. Other events are passed
+# over unless WT_ALL. After WT_TIMEOUT seconds with nothing, print a timeout
+# record instead, which is the orchestrator's cue for a sweep.
+WT_EVENTS_PL='
+use strict; use warnings;
+use JSON::PP; use Time::HiRes qw(sleep time);
+my $json = JSON::PP->new->canonical->utf8;
+my $dir = $ENV{WT_DIR};
+my $cur = "$dir/events.jsonl";
+my $old = "$dir/events.1.jsonl";
+my ($wait, $all, $timeout) = ($ENV{WT_WAIT}, $ENV{WT_ALL}, $ENV{WT_TIMEOUT} || 0);
+$| = 1;
+
+sub ino { my @s = stat $_[0]; @s ? ($s[1], $s[7]) : (0, 0) }
+my ($ino, $off);
+if (($ENV{WT_SINCE} // "") =~ /^(\d+):(\d+)$/) { ($ino, $off) = ($1, $2) }
+elsif ($wait) { my ($i, $size) = ino($cur); ($ino, $off) = ($i, $size) }
+else { ($ino, $off) = ((ino($cur))[0], 0) }
+
+my @buf;
+my $reset = 0;
+# Read whatever has been appended since the cursor, following a rotation.
+sub drain {
+  my ($ci, $csize) = ino($cur);
+  if ($ino && $ino != $ci) {
+    my ($oi) = ino($old);
+    if ($oi && $oi == $ino) { read_from($old, $off) } else { $reset = 1 }
+    ($ino, $off) = ($ci, 0);
+  } elsif (!$ino) {
+    ($ino, $off) = ($ci, 0);
+  } elsif ($off > $csize) {
+    $reset = 1; $off = 0;
+  }
+  return unless $ino;
+  $off = read_from($cur, $off);
+}
+sub read_from {
+  my ($file, $from) = @_;
+  open(my $fh, "<", $file) or return $from;
+  seek($fh, $from, 0);
+  while (my $l = <$fh>) {
+    last unless $l =~ /\n\z/;   # a line still being written
+    $from += length $l;
+    my $e = eval { $json->decode($l) } or next;
+    push @buf, $e;
+  }
+  close $fh;
+  return $from;
+}
+sub waking {
+  my $e = shift;
+  my $t = $e->{type} // "";
+  return $t eq "waiting" || $t eq "error" || ($t eq "stop" && !($e->{bg_tasks} // 0));
+}
+sub emit {
+  my @out = $all ? @buf : grep { waking($_) } @buf;
+  my $c = "$ino:$off";
+  print $json->encode({ type => "reset", cursor => $c }), "\n" if $reset;
+  print $json->encode({ %$_, cursor => $c }), "\n" for @out;
+  return scalar @out;
+}
+
+drain();
+if (!$wait) { $all = 1; emit(); exit 0 }
+my $start = time;
+while (1) {
+  if ($reset || grep { waking($_) } @buf) {
+    my $until = time + 2;
+    while (time < $until) { sleep 0.25; drain() }
+    emit();
+    exit 0;
+  }
+  @buf = () unless $all;
+  if ($all && @buf) { emit(); exit 0 }
+  if ($timeout && time - $start >= $timeout) {
+    print $json->encode({ type => "timeout", cursor => "$ino:$off" }), "\n";
+    exit 0;
+  }
+  sleep 0.5;
+  drain();
+}
+'
+
+# `wt events [--wait] [--since <cursor>] [--timeout <s>] [--all]`: what the
+# claude sessions wt started have been doing, one JSON object a line. With
+# --wait it blocks until one needs looking at - the orchestrator runs it in
+# the background and is woken when it exits. See WT_EVENTS_PL.
+cmd_events() {
+  local wait=0 all=0 since="" timeout=0
+  while (( $# )); do
+    case "$1" in
+      --wait) wait=1 ;;
+      --all) all=1 ;;
+      --since) since="${2:-}"; shift ;;
+      --since=*) since="${1#--since=}" ;;
+      --timeout) timeout="${2:-}"; shift ;;
+      --timeout=*) timeout="${1#--timeout=}" ;;
+      *) die "unknown option '$1' for 'wt events'" ;;
+    esac
+    shift
+  done
+  [[ -z "$since" || "$since" =~ ^[0-9]+:[0-9]+$ ]] \
+    || die "--since takes a cursor from an earlier event, not '$since'"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || die "--timeout takes a number of seconds, not '$timeout'"
+  local dir; dir=$(wt_state_dir) || die "cannot create the state directory"
+  WT_DIR="$dir" WT_WAIT="$wait" WT_ALL="$all" WT_SINCE="$since" WT_TIMEOUT="$timeout" \
+    perl -e "$WT_EVENTS_PL"
+}
+
 # `wt status [--json] [--no-pr]`: every worktree across all repos, with its
 # pull request and what the claude in it is doing. --json is for the
 # orchestrator; --no-pr (or WT_NO_PR=1) skips asking GitHub.
@@ -3066,6 +3185,9 @@ Usage:
                           Every worktree across all repos under WT_ROOT, with
                           its pull request, its issue or ticket, and what its
                           claude is doing; works from any directory
+  wt events [--wait] [--since <cursor>] [--timeout <s>] [--all]
+                          The claude sessions' changes of state, as JSON
+                          lines; --wait blocks until one needs looking at
   wt --version            Print the installed version
 
 Env vars:
@@ -3114,6 +3236,7 @@ case "${1:-}" in
   __tab-title) shift; cmd_tab_title "$@" ;;
   __hook) shift; cmd_hook "$@" ;;
   status) shift; cmd_status "$@" ;;
+  events) shift; cmd_events "$@" ;;
   __ui) shift; cmd_ui_action "$@" ;;
   -V|--version|version) echo "wt $WT_VERSION" ;;
   "") cmd_ui issues 0 ;;

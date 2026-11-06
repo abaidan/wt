@@ -461,6 +461,13 @@ never print or fail, so a problem with them can't show up in a session.
 A `claude` started before upgrading `wt` keeps the hooks it started with;
 restart it to pick these up. Set `WT_NO_STATE=1` to turn this off.
 
+`wt events` prints those changes as JSON lines, each with a `cursor` to pass
+back as `--since`. `wt events --wait` blocks until a session needs looking
+at: one waiting on a question or a permission, one that finished a turn with
+no background work left, or an error. It then gives a burst two seconds to
+land, prints it and exits. `--timeout <s>` gives up after that long with a
+`timeout` record; `--all` wakes on every change instead.
+
 ## Keeping the Mac awake
 
 Not part of `wt` itself, but useful when several worktrees have agents working
