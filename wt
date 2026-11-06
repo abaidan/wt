@@ -34,6 +34,9 @@
 #   wt notify --title <t> --message <m> [--worktree <w>]
 #                             Show a desktop notification; clicking it runs
 #                             `wt go <w>` (needs terminal-notifier)
+#   wt send <worktree> <text> [--submit]
+#                             Type into the prompt box of that worktree's
+#                             claude, left unsent unless --submit
 #   wt --version              Print the installed version
 #
 # Env vars:
@@ -2167,6 +2170,100 @@ cmd_notify() {
   echo "Notified: $title - $message"
 }
 
+# Type $2 into iTerm2 session $1, then press return if $3 is 1.
+write_iterm_session() {
+  local session_id="$1" text="$2" submit="${3:-0}"
+  local enter=""
+  if [[ "$submit" == "1" ]]; then
+    # Sent on its own a moment later: claude reads a return that arrives in
+    # the same burst as the text as part of a paste, not as "send".
+    enter="            delay 0.3
+            write text \"\" newline yes"
+  fi
+  local found
+  found=$(osascript 2>/dev/null <<APPLESCRIPT
+if application "iTerm2" is running then
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s) is "$(applescript_escape "$session_id")" then
+            tell s
+            write text "$(applescript_escape "$text")" newline no
+$enter
+            end tell
+            return "1"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+end if
+return ""
+APPLESCRIPT
+  ) || return 1
+  [[ "$found" == "1" ]]
+}
+
+# `wt send <worktree> <text> [--submit]`: type text into the prompt box of the
+# claude in that worktree's tab, left there for you to send unless --submit.
+# The tab is the one wt opened for it, found by its tag; failing that, the
+# only tab sitting in it.
+cmd_send() {
+  local submit=0
+  local -a pos=()
+  while (( $# )); do
+    case "$1" in
+      --submit) submit=1 ;;
+      --) shift; pos+=("$@"); break ;;
+      *) pos+=("$1") ;;
+    esac
+    shift
+  done
+  (( ${#pos[@]} == 2 )) || die "usage: wt send <worktree> <text> [--submit]"
+  local text="${pos[1]}"
+  [[ -n "$text" ]] || die "nothing to send"
+  [[ "$text" != *$'\n'* && "$text" != *$'\r'* ]] \
+    || die "the text must be one line: a newline in claude's prompt box would send it early"
+
+  local wt_path; wt_path=$(resolve_worktree_arg "${pos[0]}") || exit 1
+
+  local -a tagged=() any=()
+  local table id tty tag status
+  if table=$(iterm_session_table) && [[ -n "$table" ]]; then
+    while IFS="$WT_FS" read -r id tty _ tag status; do
+      [[ -n "$id" ]] || continue
+      if [[ "$tag" == "$wt_path" ]]; then
+        tagged+=("$id")
+      elif [[ -n "$tty" ]] && tty_is_in "$tty" "$wt_path"; then
+        any+=("$id")
+      fi
+    done <<< "$table"
+  else
+    while IFS=$'\t' read -r id _; do
+      [[ -z "$id" ]] || any+=("$id")
+    done < <(iterm_sessions_in "$wt_path")
+  fi
+  local target=""
+  if (( ${#tagged[@]} == 1 )); then
+    target="${tagged[0]}"
+  elif (( ${#tagged[@]} == 0 && ${#any[@]} == 1 )); then
+    target="${any[0]}"
+  elif (( ${#tagged[@]} + ${#any[@]} == 0 )); then
+    die "no iTerm2 tab is open in $wt_path (try 'wt go ${pos[0]}')"
+  else
+    die "more than one tab is open in $wt_path; switch to it and type there"
+  fi
+
+  write_iterm_session "$target" "$text" "$submit" \
+    || die "could not type into that tab"
+  if (( submit )); then
+    echo "Sent to ${pos[0]}: $text"
+  else
+    echo "Typed into ${pos[0]}'s prompt box, not sent: $text"
+  fi
+}
+
 # `wt status [--json] [--no-pr]`: every worktree across all repos, with its
 # pull request and what the claude in it is doing. --json is for the
 # orchestrator; --no-pr (or WT_NO_PR=1) skips asking GitHub.
@@ -3281,6 +3378,10 @@ Usage:
   wt notify --title <t> --message <m> [--worktree <w>]
                           Show a desktop notification; with terminal-notifier
                           installed, clicking it runs "wt go <w>"
+  wt send <worktree> <text> [--submit]
+                          Type one line into the prompt box of the claude in
+                          that worktree's tab; it is left there for you to
+                          send unless --submit is given
   wt --version            Print the installed version
 
 Env vars:
@@ -3332,6 +3433,7 @@ case "${1:-}" in
   events) shift; cmd_events "$@" ;;
   go)   shift; cmd_go "$@" ;;
   notify) shift; cmd_notify "$@" ;;
+  send) shift; cmd_send "$@" ;;
   __ui) shift; cmd_ui_action "$@" ;;
   -V|--version|version) echo "wt $WT_VERSION" ;;
   "") cmd_ui issues 0 ;;
