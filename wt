@@ -383,55 +383,81 @@ claude_cmd() {
     cmd="$cmd $WT_CLAUDE_ARGS"
   fi
   local settings
-  if settings=$(tab_title_settings); then
+  if settings=$(claude_settings); then
     cmd="$cmd --settings $(printf '%q' "$settings")"
   fi
   echo "$cmd"
 }
 
-# Hooks that put a worktree's pull request number in its iTerm2 tab title,
-# written to a settings file passed to `claude --settings` so nothing has to be
-# added to the user's own Claude Code configuration. They call back into this
-# script (see cmd_tab_title). Prints the file's path, or fails when titles are
-# turned off or the file cannot be written.
-tab_title_settings() {
-  [[ "${WT_NO_TAB_TITLE:-0}" != "1" ]] || return 1
+# Where wt keeps state that outlives a run: the settings file below, and
+# (see cmd_hook) what each claude it started is doing. Created on demand.
+wt_state_dir() {
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/wt"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  echo "$dir"
+}
 
-  # The hook runs from wherever claude was started, so a bare "wt" is pinned
-  # down to the copy on the PATH now.
+# This script's absolute path, for hooks and other callbacks that run from
+# wherever claude was started: a bare "wt" is pinned down to the copy on the
+# PATH now.
+wt_self_path() {
   local self="$WT_SELF"
   if [[ "$self" != /* ]]; then
     self=$(command -v "$self" 2>/dev/null) || return 1
   fi
+  echo "$self"
+}
 
-  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/wt"
+# Write a Claude Code settings file holding only hooks, from lines on stdin of
+# "event<TAB>matcher<TAB>async<TAB>command" (matcher may be empty; async is 0
+# or 1). The file is replaced atomically, so a claude starting while another
+# `wt` rewrites it never reads half of it.
+WT_HOOKS_JSON_PL='
+use JSON::PP;
+my (%hooks, @order);
+while (my $l = <STDIN>) {
+  chomp $l;
+  my ($event, $matcher, $async, $command) = split /\t/, $l, 4;
+  next unless defined $command && length $command;
+  push @order, $event unless $hooks{$event};
+  my $h = { type => "command", command => $command };
+  $h->{async} = JSON::PP::true if $async;
+  my $entry = { hooks => [$h] };
+  $entry->{matcher} = $matcher if length $matcher;
+  push @{ $hooks{$event} }, $entry;
+}
+print JSON::PP->new->canonical->pretty->encode({ hooks => \%hooks });
+'
+write_hooks_settings() {
+  local file="$1"
+  perl -e "$WT_HOOKS_JSON_PL" > "$file.$$" 2>/dev/null \
+    && mv -f "$file.$$" "$file" 2>/dev/null \
+    || { rm -f "$file.$$"; return 1; }
+}
+
+# Hooks that `wt` passes to the claude it starts, written to a settings file
+# for `claude --settings` so nothing has to be added to the user's own Claude
+# Code configuration. They call back into this script: cmd_tab_title puts the
+# worktree's pull request number in the tab title. Prints the file's path, or
+# fails when the file cannot be written.
+#
+# The file keeps its old name: claude sessions already running were started
+# with it, and read it again.
+claude_settings() {
+  local self; self=$(wt_self_path) || return 1
+  local dir; dir=$(wt_state_dir) || return 1
   local file="$dir/claude-tab-title.json"
-  mkdir -p "$dir" 2>/dev/null || return 1
+  local wt; wt=$(printf '%q' "$self")
+  local T=$'\t'
 
-  local hook; hook=$(json_escape "$(printf '%q' "$self") __tab-title")
-  cat > "$file" 2>/dev/null <<EOF || return 1
-{
-  "hooks": {
-    "PostToolUse": [
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "$hook created" }] }
-    ],
-    "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "$hook idle" }] }
-    ],
-    "Stop": [
-      { "hooks": [{ "type": "command", "command": "$hook idle" }] }
-    ]
-  }
-}
-EOF
+  {
+    if [[ "${WT_NO_TAB_TITLE:-0}" != "1" ]]; then
+      echo "PostToolUse${T}Bash${T}0${T}$wt __tab-title created"
+      echo "SessionStart${T}${T}0${T}$wt __tab-title idle"
+      echo "Stop${T}${T}0${T}$wt __tab-title idle"
+    fi
+  } | write_hooks_settings "$file" || return 1
   echo "$file"
-}
-
-json_escape() {
-  local s="$1"
-  s="${s//\\/\\\\}"
-  s="${s//\"/\\\"}"
-  printf '%s' "$s"
 }
 
 # The terminal the hook's claude is drawing on. Hooks get a pipe for stdin and
@@ -450,7 +476,7 @@ hook_tty() {
   return 1
 }
 
-# `wt __tab-title created|idle`, run by the hooks from tab_title_settings with
+# `wt __tab-title created|idle`, run by the hooks from claude_settings with
 # the hook's JSON on stdin.
 #
 # Claude Code sets the tab title itself (its topic, and a spinner while it
