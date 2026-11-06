@@ -45,6 +45,7 @@ issue link waiting in the prompt box for you to send.
 | **[gh](https://cli.github.com)** | Optional. Needed for the issue and pull request pickers, issue-named branches, issue links, and pull request status in the `wt list` / `wt rm` pickers. Run `gh auth login` once. |
 | **curl + [jq](https://jqlang.org)** | Optional. Needed for Jira tickets. curl ships with macOS; `brew install jq`. |
 | **[fzf](https://github.com/junegunn/fzf)** | Optional. Gives the interactive pickers; without it every picker falls back to a numbered menu. |
+| **[terminal-notifier](https://github.com/julienXX/terminal-notifier)** | Optional. Lets a click on an orchestrator notification take you to the session it is about, and a newer notification replace an older one; `brew install terminal-notifier`. Without it, notifications still show, through `osascript`, but a click does nothing useful. |
 | **[shellcheck](https://www.shellcheck.net)** | Optional. Used by `./build` if present. |
 
 ## Install

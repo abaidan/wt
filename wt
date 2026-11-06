@@ -31,6 +31,9 @@
 #                             until one needs looking at
 #   wt go <worktree>          Switch to a worktree's tab (or open one), from any
 #                             directory; <repo>/<dir> as `wt status` shows it
+#   wt notify --title <t> --message <m> [--worktree <w>]
+#                             Show a desktop notification; clicking it runs
+#                             `wt go <w>` (needs terminal-notifier)
 #   wt --version              Print the installed version
 #
 # Env vars:
@@ -2115,6 +2118,55 @@ cmd_go() {
   open_worktree "$wt_path"
 }
 
+# Show a desktop notification: title $1, message $2. $3, if given, is a shell
+# command to run when it's clicked, and $4 a group, so a later notification in
+# the same group replaces the earlier one instead of piling up. The one place
+# that knows how notifications are shown, for other platforms to fill in.
+#
+# terminal-notifier does all of that. Without it, osascript shows the
+# notification but can't act on a click, nor replace one.
+os_notify() {
+  local title="$1" message="$2" click="${3:-}" group="${4:-}"
+  if command -v terminal-notifier >/dev/null 2>&1; then
+    local -a args=(-title "$title" -message "$message" -sender com.googlecode.iterm2)
+    [[ -z "$group" ]] || args+=(-group "$group")
+    [[ -z "$click" ]] || args+=(-execute "$click")
+    terminal-notifier "${args[@]}" >/dev/null 2>&1
+    return
+  fi
+  osascript -e "display notification \"$(applescript_escape "$message")\" with title \"$(applescript_escape "$title")\"" \
+    >/dev/null 2>&1
+}
+
+# `wt notify [--worktree <w>] --title <t> --message <m>`: a desktop
+# notification from the orchestrator. With --worktree, clicking it runs
+# `wt go` on that worktree, and a newer one about it replaces the last.
+cmd_notify() {
+  local worktree="" title="" message=""
+  while (( $# )); do
+    case "$1" in
+      --worktree) worktree="${2:-}"; shift ;;
+      --title)    title="${2:-}"; shift ;;
+      --message)  message="${2:-}"; shift ;;
+      *) die "unknown option '$1' for 'wt notify'" ;;
+    esac
+    shift
+  done
+  [[ -n "$title" || -n "$message" ]] || die "wt notify needs a --title or a --message"
+  [[ -n "$title" ]] || title="wt"
+
+  local click="" group="wt"
+  if [[ -n "$worktree" ]]; then
+    local wt_path; wt_path=$(resolve_worktree_arg "$worktree") || exit 1
+    local self; self=$(wt_self_path) || self="wt"
+    click="$(printf '%q' "$self") go $(printf '%q' "$wt_path")"
+    group="wt-$(printf '%s' "$wt_path" | shasum | cut -c1-12)"
+  fi
+  os_notify "$title" "$message" "$click" "$group" \
+    || die "could not show the notification"
+  echo "Notified: $title - $message"
+}
+
 # `wt status [--json] [--no-pr]`: every worktree across all repos, with its
 # pull request and what the claude in it is doing. --json is for the
 # orchestrator; --no-pr (or WT_NO_PR=1) skips asking GitHub.
@@ -3226,6 +3278,9 @@ Usage:
   wt go <worktree>        Switch to that worktree's tab, or open one, from any
                           directory: <repo>/<dir> as "wt status" shows it, or
                           just <dir> or the branch when that is unambiguous
+  wt notify --title <t> --message <m> [--worktree <w>]
+                          Show a desktop notification; with terminal-notifier
+                          installed, clicking it runs "wt go <w>"
   wt --version            Print the installed version
 
 Env vars:
@@ -3276,6 +3331,7 @@ case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   events) shift; cmd_events "$@" ;;
   go)   shift; cmd_go "$@" ;;
+  notify) shift; cmd_notify "$@" ;;
   __ui) shift; cmd_ui_action "$@" ;;
   -V|--version|version) echo "wt $WT_VERSION" ;;
   "") cmd_ui issues 0 ;;
