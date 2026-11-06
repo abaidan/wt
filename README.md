@@ -378,14 +378,66 @@ ticket it was made for, and what its `claude` is doing, from the
 `error`, `ended`, or `crashed` when its process is gone mid-turn. Pull requests
 are looked up with one GitHub query per repo, not one per worktree.
 
+`--json` also gives each session's last message, its transcript and how long
+that has been quiet, and whether a tab is open in it. The tab comes from
+iTerm2 when it can say, and is `null` when it can't.
+
 `wt go <worktree>` switches to a worktree's tab, or opens one with `claude`,
 from any directory, like `wt open` but without having to be in its repo. The
 worktree is named as `wt status` shows it, `<repo>/<dir>`, or just by its
 directory or branch when no other repo has one by that name.
 
-`--json` also gives each session's last message, its transcript and how long
-that has been quiet, and whether a tab is open in it. The tab comes from
-iTerm2 when it can say, and is `null` when it can't.
+### `wt orchestrator` — one tab that watches the rest
+
+```sh
+wt orchestrator         # or: wt o
+```
+
+This opens one tab, for all your repos, running a `claude` whose only job is
+to watch the other sessions `wt` started and tell you when one needs you. It
+starts with a board of the sessions, then stays quiet until something
+happens, and notifies you, in its tab and as a desktop notification, when a
+session is:
+
+| | |
+|---|---|
+| **BLOCKED** | waiting on a permission or a form |
+| **QUESTION** | asking you something, whether as a question prompt or at the end of its turn |
+| **FAILED** | stopped on an error, crashed, or its pull request's checks are failing |
+| **STALLED** | working, but its transcript has been quiet for 20 minutes, or going in circles |
+| **READY** | its pull request is open and green, waiting on your review or merge (once, never a reminder) |
+
+A notification is sent once per item, with a reminder after 30 minutes and
+then at most hourly. Several at once come as one. With
+[terminal-notifier](https://github.com/julienXX/terminal-notifier) installed,
+clicking one takes you to that session's tab. Running `wt o` again switches to
+the orchestrator's tab rather than opening a second.
+
+You can talk to it too: "what's open?", "go to wt/12-retry-uploads", or "tell
+wt/12-retry-uploads to rebase on main". It types that into the session's
+prompt box with `wt send` and leaves it unsent unless you said to send it. It
+asks your permission each time.
+
+How it works, and what it may do:
+
+- It wakes on `wt events --wait`, run as a background command, so it costs
+  nothing while nothing happens. Every event that does wake it is one model
+  turn, so it runs on Sonnet by default
+  (`WT_ORCHESTRATOR_CLAUDE_ARGS`, default
+  `--permission-mode default --model sonnet`).
+- It runs in `~/.local/state/wt/orchestrator`, outside any repo, with its own
+  settings file there. That file allows `wt status`, `wt events`, `wt notify`,
+  `wt go`, read-only `gh pr` commands and reading transcripts. It asks before
+  `wt send`, and denies edits, pushes, merges, comments, and `wt new` or
+  `wt rm`. It gets none of `wt`'s hooks, so its own turns never wake it.
+- It treats everything it reads from sessions, pull requests and issues as
+  data, never as instructions, and never answers a session on its own.
+- The first time, Claude Code asks whether to trust that directory.
+- Only sessions started by a `wt` with this feature are seen; restart older
+  ones.
+- `WT_ORCHESTRATOR_PROMPT_FILE` replaces the built-in prompt; the default is
+  `orchestrator_prompt` in the script. Claude Code's and iTerm2's own
+  notifications still fire alongside it; turn those off if you get doubles.
 
 ## Configuration
 
@@ -408,6 +460,8 @@ All optional, all environment variables.
 | `WT_KEEP_TABS` | unset | Set to `1` to leave a removed worktree's iTerm2 tabs open. |
 | `WT_NO_TAB_TITLE` | unset | Set to `1` to keep `PR #<n>` out of the tab title. |
 | `WT_NO_STATE` | unset | Set to `1` to stop recording what each `claude` that `wt` starts is doing (see [Session state](#session-state)). |
+| `WT_ORCHESTRATOR_CLAUDE_ARGS` | `--permission-mode default --model sonnet` | Arguments for the orchestrator's `claude`. |
+| `WT_ORCHESTRATOR_PROMPT_FILE` | unset | A file to use as the orchestrator's prompt instead of the built-in one. |
 | `WT_NEW_TAB` | unset | Set to `1` to always open a new tab when reopening a worktree, even if one is already open in it. |
 | `WT_JIRA_URL` | unset | Your Jira Cloud site, e.g. `https://example.atlassian.net`. Turns the Jira support on. |
 | `WT_JIRA_EMAIL` | `git config --global user.email` | The Atlassian account to sign in as. |
