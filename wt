@@ -53,6 +53,8 @@
 #                    worktree
 #   WT_NO_TAB_TITLE  If set to "1", don't put the pull request number in the
 #                    tab title of a claude that `wt` starts
+#   WT_NO_STATE      If set to "1", don't record what the claude sessions `wt`
+#                    starts are doing (used by `wt status` and the orchestrator)
 #   WT_NEW_TAB       If set to "1", always open a new tab when reopening a
 #                    worktree, even if one is already open in it
 #   WT_JIRA_URL      Jira Cloud site, e.g. https://example.atlassian.net;
@@ -456,6 +458,20 @@ claude_settings() {
       echo "SessionStart${T}${T}0${T}$wt __tab-title idle"
       echo "Stop${T}${T}0${T}$wt __tab-title idle"
     fi
+    # What each session is doing, for `wt status` and the orchestrator (see
+    # cmd_hook). Only PostToolUse is async: it fires after every tool, and the
+    # rest must land in order.
+    if [[ "${WT_NO_STATE:-0}" != "1" ]]; then
+      echo "SessionStart${T}${T}0${T}$wt __hook start"
+      echo "UserPromptSubmit${T}${T}0${T}$wt __hook prompt"
+      echo "PreToolUse${T}AskUserQuestion${T}0${T}$wt __hook question"
+      echo "PermissionRequest${T}${T}0${T}$wt __hook permission"
+      echo "Notification${T}permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input${T}0${T}$wt __hook notify"
+      echo "PostToolUse${T}${T}1${T}$wt __hook activity"
+      echo "Stop${T}${T}0${T}$wt __hook stop"
+      echo "StopFailure${T}${T}0${T}$wt __hook failure"
+      echo "SessionEnd${T}${T}0${T}$wt __hook end"
+    fi
   } | write_hooks_settings "$file" || return 1
   echo "$file"
 }
@@ -545,6 +561,176 @@ cmd_tab_title() {
       printf '\033]1;PR #%s\007' "$pr" > "$tty" 2>/dev/null || true
     fi
   ) </dev/null >/dev/null 2>&1 &
+  return 0
+}
+
+# The claude process a hook belongs to: the nearest ancestor that is claude
+# itself (or the node running it). Used to tell a session that crashed from
+# one that is still working.
+hook_claude_pid() {
+  local pid=$$ comm
+  while [[ -n "$pid" && "$pid" != 0 && "$pid" != 1 ]]; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    case "${comm##*/}" in claude|node) echo "$pid"; return 0 ;; esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+  done
+  return 1
+}
+
+# Where `wt` records what the claude sessions it started are doing:
+#   sessions/<leaf>-<hash>.json  one per worktree, its latest state
+#   events.jsonl                 one line per change of state, for
+#                                `wt events` to hand to the orchestrator
+# Nothing in either comes from iTerm2, so they work wherever the hooks do.
+#
+# States: idle, working, waiting (reason: question, permission,
+# elicitation, input), error, ended.
+WT_HOOK_PL='
+use strict; use warnings;
+use JSON::PP; use Digest::SHA qw(sha1_hex); use Fcntl qw(:flock);
+use File::Basename qw(basename dirname); use Time::HiRes qw(time);
+
+my $t0 = int(time * 1000);
+my $event = $ENV{WT_EVENT} // "";
+my $dir = $ENV{WT_DIR};
+my $json = JSON::PP->new->canonical->utf8;
+local $/; my $raw = <STDIN> // "";
+my $in = eval { $json->decode($raw) };
+exit 0 unless ref $in eq "HASH";
+
+sub git1 { my @a = @_; open(my $fh, "-|", "git", @a) or return ""; my $o = <$fh> // ""; close $fh; $o =~ s/\s+\z//; $o }
+sub clip { my ($s, $n) = @_; $s //= ""; $s = ref $s ? $json->encode($s) : "$s"; length($s) > $n ? substr($s, 0, $n) . "..." : $s }
+sub tail { my ($s, $n) = @_; $s //= ""; length($s) > $n ? "..." . substr($s, -$n) : $s }
+
+# The worktree: where claude was started, which is the worktree root for a
+# session wt opened; otherwise the repo the hook ran in.
+my $path = $ENV{WT_PROJECT} // "";
+if (!length $path) {
+  my $cwd = $in->{cwd} // "";
+  exit 0 unless length $cwd;
+  $path = git1("-C", $cwd, "rev-parse", "--show-toplevel") || $cwd;
+}
+$path =~ s{/+\z}{};
+# The orchestrator, and anything else run from the state dir, is never
+# recorded: its own turns would wake it again.
+exit 0 if $path eq $dir || index($path, "$dir/") == 0;
+
+my $sdir = "$dir/sessions";
+mkdir $sdir unless -d $sdir;
+my $leaf = basename($path);
+my $sfile = "$sdir/$leaf-" . substr(sha1_hex($path), 0, 12) . ".json";
+
+open(my $lock, ">>", "$sdir/.lock") or exit 0;
+flock($lock, LOCK_EX) or exit 0;
+
+my $s = {};
+if (open(my $fh, "<", $sfile)) { local $/; $s = eval { $json->decode(<$fh>) } || {}; close $fh }
+
+# An async PostToolUse can finish after the Stop that followed it; whatever
+# was written since this hook started wins.
+exit 0 if $event eq "activity" && ($s->{updated_ms} // 0) > $t0;
+
+my ($state, $reason, $type, $msg) = ($s->{state} // "", "", "", undef);
+if ($event eq "start") {
+  # Compaction happens mid-turn; the session has not started over.
+  exit 0 if ($in->{source} // "") eq "compact";
+  ($state, $type) = ("idle", "start");
+} elsif ($event eq "prompt") {
+  ($state, $type, $msg) = ("working", "prompt", clip($in->{prompt}, 300));
+} elsif ($event eq "question") {
+  my $q = $in->{tool_input}{questions};
+  my $text = ref $q eq "ARRAY" ? join(" / ", map { ref $_ ? ($_->{question} // "") : $_ } @$q) : clip($in->{tool_input}, 500);
+  ($state, $reason, $type, $msg) = ("waiting", "question", "waiting", clip($text, 2000));
+} elsif ($event eq "permission") {
+  ($state, $reason, $type, $msg) = ("waiting", "permission", "waiting",
+    ($in->{tool_name} // "a tool") . ": " . clip($in->{tool_input}, 300));
+} elsif ($event eq "notify") {
+  my $nt = $in->{notification_type} // "";
+  $reason = $nt eq "permission_prompt" ? "permission" : $nt =~ /^elicitation/ ? "elicitation" : "input";
+  ($state, $type, $msg) = ("waiting", "waiting", clip($in->{message}, 2000));
+  # A PermissionRequest already said so, and with the tool in it.
+  if (($s->{state} // "") eq "waiting" && ($s->{reason} // "") eq $reason) { exit 0 }
+} elsif ($event eq "activity") {
+  exit 0 if ($s->{state} // "") eq "working";
+  ($state, $type) = ("working", "resumed");
+} elsif ($event eq "stop") {
+  my $bg = $in->{background_tasks};
+  $s->{bg_tasks} = ref $bg eq "ARRAY" ? scalar @$bg : ($bg // 0) =~ /^\d+\z/ ? $bg + 0 : 0;
+  ($state, $type, $msg) = ("idle", "stop", tail($in->{last_assistant_message}, 2000));
+} elsif ($event eq "failure") {
+  ($state, $type, $msg) = ("error", "error",
+    clip(join(": ", grep { defined && length } map { ref $_ ? $json->encode($_) : $_ } $in->{error}, $in->{error_details}), 2000));
+} elsif ($event eq "end") {
+  ($state, $reason, $type) = ("ended", clip($in->{reason}, 100), "end");
+} else {
+  exit 0;
+}
+
+my $changed = $state ne ($s->{state} // "") || $reason ne ($s->{reason} // "")
+  || ($type eq "stop" && ($msg // "") ne ($s->{last_message} // ""));
+
+my $now = time;
+my %prev = %$s;
+$s->{v} = 1;
+$s->{path} = $path;
+$s->{session_id} = $in->{session_id} if defined $in->{session_id};
+$s->{transcript_path} = $in->{transcript_path} if defined $in->{transcript_path};
+$s->{permission_mode} = $in->{permission_mode} if defined $in->{permission_mode};
+if ($event eq "start" || $event eq "prompt" || !defined $s->{repo}) {
+  my $common = git1("-C", $path, "rev-parse", "--path-format=absolute", "--git-common-dir");
+  $s->{repo} = basename(dirname($common)) if length $common;
+  $s->{branch} = git1("-C", $path, "branch", "--show-current");
+  $s->{tty} = $ENV{WT_TTY} if length($ENV{WT_TTY} // "");
+  $s->{claude_pid} = $ENV{WT_PID} + 0 if ($ENV{WT_PID} // "") =~ /^\d+\z/;
+}
+$s->{repo} //= "";
+$s->{name} = length $s->{repo} ? "$s->{repo}/$leaf" : $leaf;
+$s->{state_since} = int($now) if $changed && $state ne ($prev{state} // "");
+$s->{state} = $state;
+$s->{reason} = $reason;
+$s->{last_message} = $msg if defined $msg && $type ne "prompt";
+$s->{last_prompt} = $msg if $type eq "prompt";
+$s->{bg_tasks} = 0 if $type eq "prompt";
+$s->{last_activity} = int($now);
+$s->{updated_ms} = int($now * 1000);
+
+my $tmp = "$sfile.$$";
+if (open(my $out, ">", $tmp)) { print $out $json->encode($s); close $out; rename $tmp, $sfile }
+
+if ($changed) {
+  my $ev = $json->encode({
+    v => 1, ts => int($now), ts_ms => int($now * 1000), type => $type,
+    path => $path, name => $s->{name}, repo => $s->{repo}, branch => $s->{branch} // "",
+    session_id => $s->{session_id} // "", transcript_path => $s->{transcript_path} // "",
+    state => $state, prev_state => $prev{state} // "", reason => $reason,
+    message => $msg // "", bg_tasks => $s->{bg_tasks} // 0,
+  }) . "\n";
+  my $efile = "$dir/events.jsonl";
+  rename $efile, "$dir/events.1.jsonl" if (-s $efile // 0) > 5 * 1024 * 1024;
+  if (open(my $e, ">>", $efile)) { syswrite $e, $ev; close $e }
+}
+'
+
+# `wt __hook <event>`, run by the state hooks from claude_settings with the
+# hook's JSON on stdin. Records what the session is doing (see WT_HOOK_PL).
+# A hook that fails or prints shows up in every session, so this always exits
+# 0, prints nothing, and never touches the network.
+cmd_hook() {
+  local event="${1:-}"
+  if [[ "${WT_NO_STATE:-0}" == "1" ]]; then
+    cat >/dev/null 2>&1 || true
+    return 0
+  fi
+  (
+    dir=$(wt_state_dir) || exit 0
+    tty="" pid=""
+    if [[ "$event" == start || "$event" == prompt ]]; then
+      tty=$(hook_tty) || tty=""
+      pid=$(hook_claude_pid) || pid=""
+    fi
+    WT_EVENT="$event" WT_DIR="$dir" WT_TTY="$tty" WT_PID="$pid" \
+      WT_PROJECT="${CLAUDE_PROJECT_DIR:-}" perl -e "$WT_HOOK_PL"
+  ) >/dev/null 2>&1 || true
   return 0
 }
 
@@ -2617,6 +2803,7 @@ Env vars:
   NO_COLOR         Set to anything to turn off colour in the pickers
   WT_KEEP_TABS     Set to "1" to leave a removed worktree's iTerm2 tabs open
   WT_NO_TAB_TITLE  Set to "1" to keep "PR #<n>" out of the tab title
+  WT_NO_STATE      Set to "1" to stop recording what each claude is doing
   WT_NEW_TAB       Set to "1" to always open a new tab, even when the worktree
                    already has one
 
@@ -2643,6 +2830,7 @@ case "${1:-}" in
   __preview) shift; cmd_preview "$@" ;;
   __jira-preview) shift; cmd_jira_preview "$@" ;;
   __tab-title) shift; cmd_tab_title "$@" ;;
+  __hook) shift; cmd_hook "$@" ;;
   __ui) shift; cmd_ui_action "$@" ;;
   -V|--version|version) echo "wt $WT_VERSION" ;;
   "") cmd_ui issues 0 ;;

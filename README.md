@@ -374,6 +374,7 @@ All optional, all environment variables.
 | `NO_COLOR` | unset | Set to anything to turn off colour in the pickers. |
 | `WT_KEEP_TABS` | unset | Set to `1` to leave a removed worktree's iTerm2 tabs open. |
 | `WT_NO_TAB_TITLE` | unset | Set to `1` to keep `PR #<n>` out of the tab title. |
+| `WT_NO_STATE` | unset | Set to `1` to stop recording what each `claude` that `wt` starts is doing (see [Session state](#session-state)). |
 | `WT_NEW_TAB` | unset | Set to `1` to always open a new tab when reopening a worktree, even if one is already open in it. |
 | `WT_JIRA_URL` | unset | Your Jira Cloud site, e.g. `https://example.atlassian.net`. Turns the Jira support on. |
 | `WT_JIRA_EMAIL` | `git config --global user.email` | The Atlassian account to sign in as. |
@@ -416,6 +417,22 @@ one. The number is kept in the worktree's git directory and goes with it.
 
 Only a `claude` that `wt` started gets this. It needs `gh`, and it does nothing
 when `WT_NO_PR` or `WT_NO_TAB_TITLE` is set.
+
+### Session state
+
+The same settings file also gives each `claude` that `wt` starts hooks that
+record what it is doing, under `~/.local/state/wt` (or `$XDG_STATE_HOME/wt`):
+
+- `sessions/<worktree>-<hash>.json` holds each worktree's latest state:
+  `idle`, `working`, `waiting` (on a question, a permission or other input),
+  `error` or `ended`, plus its last message and transcript path.
+- `events.jsonl` gets one line per change of state. It is rotated to
+  `events.1.jsonl` at 5 MB.
+
+Nothing goes over the network and nothing in it comes from iTerm2. The hooks
+never print or fail, so a problem with them can't show up in a session.
+A `claude` started before upgrading `wt` keeps the hooks it started with;
+restart it to pick these up. Set `WT_NO_STATE=1` to turn this off.
 
 ## Keeping the Mac awake
 
