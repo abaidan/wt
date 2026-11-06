@@ -354,6 +354,33 @@ A few safety behaviours, since removal is forced underneath:
   Claude Code integration, which report when a `claude` is working; without
   them there's no such prompt.
 
+### `wt status` — everything at once
+
+```sh
+wt status               # every worktree in every repo, one line each
+wt status --json        # the same, for scripts and the orchestrator
+wt status --no-pr       # skip asking GitHub (also WT_NO_PR=1)
+```
+
+```
+wt/12-retry-uploads        waiting (question)     PR #14 open passing    https://github.com/abaidan/wt/issues/12
+wt/15-cache-summary        working                                       https://github.com/abaidan/wt/issues/15
+traq/SRE-7068-nats-alerts  idle                   PR #339 open failing   https://example.atlassian.net/browse/SRE-7068
+```
+
+Unlike the other commands it isn't tied to the repo you're standing in. It
+finds every repo with a worktree under `$WT_ROOT` and lists all of their
+worktrees, plus a repo's main checkout when a `claude` that `wt` started has
+run there. Each row has its pull request (state and checks), the issue or
+ticket it was made for, and what its `claude` is doing, from the
+[session state](#session-state) hooks: `idle`, `working`, `waiting` and on what,
+`error`, `ended`, or `crashed` when its process is gone mid-turn. Pull requests
+are looked up with one GitHub query per repo, not one per worktree.
+
+`--json` also gives each session's last message, its transcript and how long
+that has been quiet, and whether a tab is open in it. The tab comes from
+iTerm2 when it can say, and is `null` when it can't.
+
 ## Configuration
 
 All optional, all environment variables.

@@ -25,6 +25,8 @@
 #   wt list --plain           Print the plain `git worktree list` output
 #   wt open [branch]          Same as `wt list`; with a branch, opens it directly
 #   wt rm [branch]            Remove a worktree; with no argument, pick from a list
+#   wt status [--json]        Every worktree across all repos, with its pull
+#                             request and what its claude is doing
 #   wt --version              Print the installed version
 #
 # Env vars:
@@ -711,6 +713,15 @@ if ($changed) {
 }
 '
 
+# Drop what was recorded about the claude in worktree $1 (see WT_HOOK_PL for
+# the file's name), once the worktree is gone.
+forget_session_state() {
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/wt/sessions"
+  [[ -d "$dir" ]] || return 0
+  local key; key=$(printf '%s' "$1" | shasum | cut -c1-12)
+  rm -f "$dir/${1##*/}-$key.json" 2>/dev/null || true
+}
+
 # `wt __hook <event>`, run by the state hooks from claude_settings with the
 # hook's JSON on stdin. Records what the session is doing (see WT_HOOK_PL).
 # A hook that fails or prints shows up in every session, so this always exits
@@ -764,32 +775,6 @@ open_worktree() {
 record_item() {
   local gitdir; gitdir=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 0
   printf '%s\n' "$2" > "$gitdir/wt-item" 2>/dev/null || true
-}
-
-# The URL of what worktree $1 (on branch $2) is for: the one recorded when it
-# was made, or for an older worktree, one worked out from its branch name - a
-# leading number is a GitHub issue of its origin, a leading KEY-123 a Jira
-# ticket once WT_JIRA_URL is set. Prints nothing when there is no telling.
-item_url_for() {
-  local wt_path="$1" branch="$2" gitdir url=""
-  if gitdir=$(git -C "$wt_path" rev-parse --absolute-git-dir 2>/dev/null) \
-     && [[ -s "$gitdir/wt-item" ]]; then
-    url=$(head -n 1 "$gitdir/wt-item" 2>/dev/null || true)
-    [[ -z "$url" ]] || { echo "$url"; return 0; }
-  fi
-  if [[ "$branch" =~ ^([0-9]+)(-|$) ]]; then
-    local origin; origin=$(git -C "$wt_path" remote get-url origin 2>/dev/null) || return 0
-    origin="${origin%.git}"
-    if [[ "$origin" =~ ^git@([^:]+):(.+)$ ]]; then
-      origin="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-    elif [[ "$origin" =~ ^ssh://git@([^/]+)/(.+)$ ]]; then
-      origin="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-    fi
-    [[ "$origin" == https://* ]] || return 0
-    echo "$origin/issues/${branch%%-*}"
-  elif [[ -n "${WT_JIRA_URL:-}" && "$branch" =~ ^([A-Z][A-Z0-9_]+-[0-9]+)(-|$) ]]; then
-    echo "${WT_JIRA_URL%/}/browse/${BASH_REMATCH[1]}"
-  fi
 }
 
 require_gh() {
@@ -1766,6 +1751,263 @@ sort_by(.state != "OPEN")
 | @tsv
 '
 
+# Every worktree wt knows of, across all repos: each repo with a worktree
+# under $WT_ROOT, every worktree of it (its main checkout too), as
+# "repo<TAB>main<TAB>path<TAB>branch<TAB>is_main<TAB>origin_url". Works from
+# any directory.
+all_worktrees() {
+  local -a mains=()
+  local gitfile line main m seen is_main
+  for gitfile in "$WT_ROOT"/*/*/.git; do
+    [[ -f "$gitfile" ]] || continue
+    IFS= read -r line < "$gitfile" || continue
+    [[ "$line" == "gitdir: "*"/.git/worktrees/"* ]] || continue
+    main="${line#gitdir: }"
+    main="${main%/.git/worktrees/*}"
+    seen=0
+    for m in "${mains[@]+"${mains[@]}"}"; do
+      [[ "$m" != "$main" ]] || { seen=1; break; }
+    done
+    (( seen )) || mains[${#mains[@]}]="$main"
+  done
+  local path branch name origin
+  for main in "${mains[@]+"${mains[@]}"}"; do
+    [[ -d "$main" ]] || continue
+    name="${main##*/}"
+    origin=$(https_origin "$main")
+    while IFS=$'\t' read -r path branch; do
+      [[ -n "$path" ]] || continue
+      if [[ "$path" == "$main" ]]; then is_main=1; else is_main=0; fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$main" "$path" "$branch" "$is_main" "$origin"
+    done < <(list_worktrees "$main" 1 2>/dev/null)
+  done
+}
+
+# The https URL of repo $1's origin (an ssh remote rewritten), or nothing.
+https_origin() {
+  local origin; origin=$(git -C "$1" remote get-url origin 2>/dev/null) || return 0
+  origin="${origin%.git}"
+  if [[ "$origin" =~ ^git@([^:]+):(.+)$ ]]; then
+    origin="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+  elif [[ "$origin" =~ ^ssh://git@([^/]+)/(.+)$ ]]; then
+    origin="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+  fi
+  [[ "$origin" != https://* ]] || echo "$origin"
+}
+
+# Write a GraphQL query per GitHub repo for the pull requests of its
+# worktrees' branches, as $WT_TMP/q-<n>.graphql, and print "n<TAB>host" for
+# each; $WT_TMP/map gets "n<TAB>origin". Rows (see all_worktrees) on stdin;
+# branch i is asked for as alias b<i>.
+WT_PR_QUERY_PL='
+my (%n_of, %q, @order, $i);
+while (my $l = <STDIN>) {
+  chomp $l;
+  my (undef, undef, undef, $branch, undef, $origin) = split /\t/, $l, -1;
+  my $row = $i++;
+  next unless length $branch && $branch ne "(detached)";
+  next unless ($origin // "") =~ m{^https://([^/]+)/([^/]+)/([^/]+)$};
+  my ($host, $owner, $name) = ($1, $2, $3);
+  unless (exists $n_of{$origin}) { $n_of{$origin} = scalar @order; push @order, [$origin, $host, $owner, $name] }
+  (my $b = $branch) =~ s/(["\\])/\\$1/g;
+  $q{$origin} .= " b$row: pullRequests(headRefName: \"$b\", first: 5, orderBy: {field: CREATED_AT, direction: DESC})"
+    . " { nodes { number url state isDraft reviewDecision commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }\n";
+}
+open(my $map, ">", "$ENV{WT_TMP}/map") or exit 1;
+for my $o (@order) {
+  my ($origin, $host, $owner, $name) = @$o;
+  my $n = $n_of{$origin};
+  s/(["\\])/\\$1/g for $owner, $name;
+  open(my $f, ">", "$ENV{WT_TMP}/q-$n.graphql") or next;
+  print $f "query { repository(owner: \"$owner\", name: \"$name\") {\n$q{$origin}} }\n";
+  close $f;
+  print $map "$n\t$origin\n";
+  print "$n\t$host\n";
+}
+'
+
+# Assemble `wt status`, from rows on stdin of
+# "repo<TAB>main<TAB>path<TAB>branch<TAB>is_main<TAB>origin" (all_worktrees),
+# the pull requests WT_PR_QUERY_PL asked for, the session files in $WT_DIR/sessions, and iTerm2's session table in $WT_S
+# (laid over the result, never stored). A main checkout is listed only when a
+# claude wt started has run there.
+WT_STATUS_PL="$WT_TAB_RANK_PL"'
+use JSON::PP;
+my $json = JSON::PP->new->canonical->utf8;
+my $now = time;
+my %sess;
+for my $f (glob("$ENV{WT_DIR}/sessions/*.json")) {
+  open(my $fh, "<", $f) or next; local $/;
+  my $s = eval { $json->decode(<$fh>) }; close $fh;
+  $sess{$s->{path}} = $s if ref $s eq "HASH" && defined $s->{path};
+}
+my $have_tabs = length($ENV{WT_S} // "") > 0;
+my %tabst;
+for my $t (@sessions) {
+  my ($path, $tag, $st) = map { $_ // "" } @$t[2, 3, 4];
+  push @{ $tabst{$tag} }, $st if length $tag;
+}
+my %prs;
+if (open(my $m, "<", "$ENV{WT_TMP}/map")) {
+  while (my $l = <$m>) {
+    chomp $l; my ($n, $origin) = split /\t/, $l, 2;
+    open(my $f, "<", "$ENV{WT_TMP}/r-$n.json") or next; local $/;
+    my $r = eval { $json->decode(<$f>) }; close $f;
+    $prs{$origin} = $r->{data}{repository} if ref $r eq "HASH" && ref $r->{data};
+  }
+}
+# The open pull request of a branch if there is one, else its most recent.
+sub pr_of {
+  my ($origin, $row) = @_;
+  my $nodes = $prs{$origin} && $prs{$origin}{"b$row"} ? $prs{$origin}{"b$row"}{nodes} : undef;
+  return undef unless ref $nodes eq "ARRAY" && @$nodes;
+  my ($p) = (grep({ $_->{state} eq "OPEN" } @$nodes), @$nodes);
+  my $roll = eval { $p->{commits}{nodes}[0]{commit}{statusCheckRollup}{state} } // "";
+  return {
+    number => $p->{number}, url => $p->{url},
+    state => $p->{state} eq "OPEN" && $p->{isDraft} ? "draft" : lc $p->{state},
+    review => lc($p->{reviewDecision} // ""),
+    checks => !length $roll ? "none" : $roll =~ /FAILURE|ERROR/ ? "failing"
+            : $roll =~ /PENDING|EXPECTED/ ? "pending" : "passing",
+  };
+}
+my (@out, %listed);
+my $rowno = -1;
+while (my $l = <STDIN>) {
+  chomp $l;
+  $rowno++;
+  my ($repo, $main, $path, $branch, $is_main, $origin) = split /\t/, $l, -1;
+  next unless length $path;
+  my $pr = pr_of($origin // "", $rowno);
+  my $s = $sess{$path};
+  my $item = item_url($path, $branch, $origin);
+  next if $is_main && !$s;
+  $listed{$path} = 1;
+  push @out, row($repo, $path, $branch, $item, $pr, $s);
+}
+# A session wt started somewhere none of the scanned repos list.
+for my $path (sort keys %sess) {
+  next if $listed{$path} || !-d $path;
+  my $s = $sess{$path};
+  push @out, row($s->{repo} // "", $path, $s->{branch} // "", "", undef, $s);
+}
+# What the worktree is for: the URL recorded when wt made it (wt-item, in its
+# git dir), or for an older one, worked out from the branch name - a leading
+# number is a GitHub issue of its origin, a leading KEY-123 a Jira ticket.
+sub item_url {
+  my ($path, $branch, $origin) = @_;
+  my $gitdir = "$path/.git";
+  if (-f $gitdir && open(my $g, "<", $gitdir)) {
+    my $l = <$g> // ""; close $g;
+    $gitdir = $1 if $l =~ /^gitdir: (.*?)\s*$/;
+  }
+  if (open(my $f, "<", "$gitdir/wt-item")) {
+    my $u = <$f> // ""; close $f; $u =~ s/\s+\z//;
+    return $u if length $u;
+  }
+  return "$origin/issues/$1" if length $origin && $branch =~ /^(\d+)(?:-|\z)/;
+  my $jira = $ENV{WT_JIRA_URL} // ""; $jira =~ s{/+\z}{};
+  return "$jira/browse/$1" if length $jira && $branch =~ /^([A-Z][A-Z0-9_]+-\d+)(?:-|\z)/;
+  return "";
+}
+sub row {
+  my ($repo, $path, $branch, $item, $pr, $s) = @_;
+  my $leaf = $path; $leaf =~ s{.*/}{};
+  my $claude;
+  if ($s) {
+    my $state = $s->{state} // "";
+    if (($state eq "working" || $state eq "waiting") && ($s->{claude_pid} // 0) > 0 && !kill(0, $s->{claude_pid})) {
+      $state = "crashed";
+    }
+    $claude = { state => $state, reason => $s->{reason} // "", since => $s->{state_since},
+                last_message => $s->{last_message} // "", last_prompt => $s->{last_prompt} // "",
+                bg_tasks => $s->{bg_tasks} // 0, session_id => $s->{session_id} // "" };
+  }
+  my $tp = $s ? $s->{transcript_path} // "" : "";
+  my $mt = length $tp ? (stat $tp)[9] : undef;
+  my $tab;
+  if ($have_tabs) {
+    my $r = rank_of($path);
+    $tab = { open => $r > 0 ? JSON::PP::true : JSON::PP::false,
+             status => $r == 4 ? "waiting" : $r == 3 ? "error" : $r == 2 ? "working" : $r == 1 ? "open" : "" };
+  }
+  return {
+    name => length $repo ? "$repo/$leaf" : $leaf, repo => $repo, path => $path,
+    exists => -d $path ? JSON::PP::true : JSON::PP::false, branch => $branch,
+    item_url => length $item ? $item : undef,
+    pr => $pr,
+    tab => $tab, claude => $claude,
+    transcript_path => length $tp ? $tp : undef,
+    transcript_mtime => $mt, transcript_idle_s => defined $mt ? $now - $mt : undef,
+    last_event => $s ? $s->{last_activity} : undef,
+  };
+}
+if ($ENV{WT_JSON}) {
+  print JSON::PP->new->canonical->pretty->encode({ v => 1, generated => $now, worktrees => \@out });
+  exit 0;
+}
+# Long branch names would push everything else off the line.
+my $w = 0;
+for (@out) { $w = length $_->{name} if length $_->{name} > $w }
+$w = 48 if $w > 48;
+for my $r (@out) {
+  my $name = length $r->{name} > $w ? substr($r->{name}, 0, $w - 3) . "..." : $r->{name};
+  my $c = $r->{claude};
+  my $st = !$c ? "-" : $c->{state} . (length $c->{reason} ? " ($c->{reason})" : "");
+  my $code = !$c ? 90 : $c->{state} eq "waiting" ? 35 : $c->{state} =~ /error|crashed/ ? 31 : $c->{state} eq "working" ? 34 : 0;
+  my $p = $r->{pr};
+  my $prs = $p ? "PR #$p->{number} $p->{state}" . ($p->{checks} ne "none" ? " $p->{checks}" : "") : "";
+  printf "%-*s  %s  %-22s %s\n", $w, $name, paint($code, sprintf("%-22s", $st)), $prs, $r->{item_url} // "";
+}
+'
+
+# `wt status [--json] [--no-pr]`: every worktree across all repos, with its
+# pull request and what the claude in it is doing. --json is for the
+# orchestrator; --no-pr (or WT_NO_PR=1) skips asking GitHub.
+cmd_status() {
+  local as_json=0 no_pr="${WT_NO_PR:-0}"
+  while (( $# )); do
+    case "$1" in
+      --json) as_json=1 ;;
+      --no-pr) no_pr=1 ;;
+      *) die "unknown option '$1' for 'wt status'" ;;
+    esac
+    shift
+  done
+  command -v gh >/dev/null 2>&1 || no_pr=1
+
+  local dir; dir=$(wt_state_dir) || die "cannot create the state directory"
+  local tmp; tmp=$(mktemp -d) || die "cannot create a temporary directory"
+  local -a rows=()
+  local line
+  while IFS= read -r line; do rows[${#rows[@]}]="$line"; done < <(all_worktrees)
+
+  printf '%s\n' "${rows[@]+"${rows[@]}"}" > "$tmp/rows"
+
+  # One GraphQL query per repo, each branch under its own alias, rather than
+  # a `gh pr list` per worktree: with a hundred worktrees that is seconds
+  # instead of half a minute.
+  if [[ "$no_pr" != "1" ]]; then
+    local n host i=0
+    while IFS=$'\t' read -r n host; do
+      gh api graphql --hostname "$host" -F query=@"$tmp/q-$n.graphql" \
+        > "$tmp/r-$n.json" 2>/dev/null &
+      i=$((i + 1))
+      # Bash 3.2 has no `wait -n`; see pr_index_load.
+      if (( i % 8 == 0 )); then wait || true; fi
+    done < <(WT_TMP="$tmp" perl -e "$WT_PR_QUERY_PL" < "$tmp/rows")
+    wait || true
+  fi
+
+  local sessions=""
+  sessions=$(iterm_session_table 2>/dev/null) || sessions=""
+  local c=0
+  (( as_json )) || [[ ! -t 1 ]] || c=1
+  WT_DIR="$dir" WT_TMP="$tmp" WT_S="$sessions" WT_JSON="$as_json" WT_C="$c" \
+    perl -e "$WT_STATUS_PL" < "$tmp/rows"
+  rm -rf "$tmp"
+}
+
 # Pull request state, cached in WT_PR_INDEX as "<branch><TAB><label>" lines.
 # Asked for per branch rather than by listing the repo's PRs, because a busy
 # repo's most recent hundred PRs are mostly other people's and would miss the
@@ -2113,6 +2355,8 @@ remove_one_worktree() {
     echo "$out" >&2
     die "could not remove worktree at $wt_path"
   fi
+
+  forget_session_state "$wt_path"
 
   # The directory is gone, so a tab left open in it is stranded: every command
   # it runs fails on a working directory that no longer exists, and a `claude`
@@ -2818,6 +3062,10 @@ Usage:
                           worktrees whose pull request has landed)
   wt open [branch]        Same as "wt list"; with a branch, opens it directly
   wt rm [branch]          Remove a worktree; with no argument, pick from a list
+  wt status [--json] [--no-pr]
+                          Every worktree across all repos under WT_ROOT, with
+                          its pull request, its issue or ticket, and what its
+                          claude is doing; works from any directory
   wt --version            Print the installed version
 
 Env vars:
@@ -2865,6 +3113,7 @@ case "${1:-}" in
   __jira-preview) shift; cmd_jira_preview "$@" ;;
   __tab-title) shift; cmd_tab_title "$@" ;;
   __hook) shift; cmd_hook "$@" ;;
+  status) shift; cmd_status "$@" ;;
   __ui) shift; cmd_ui_action "$@" ;;
   -V|--version|version) echo "wt $WT_VERSION" ;;
   "") cmd_ui issues 0 ;;
