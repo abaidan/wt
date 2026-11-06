@@ -754,8 +754,42 @@ open_worktree() {
     echo "Prefilling claude's prompt (press enter to send it):"
     echo "  $prompt"
   fi
+  [[ -z "$url" ]] || record_item "$wt_path" "$url"
 
   open_iterm_tab "$wt_path" "$(claude_cmd)" "$prompt"
+}
+
+# Remember which issue, pull request or ticket a worktree was made for, in its
+# own git directory, where it goes when the worktree does.
+record_item() {
+  local gitdir; gitdir=$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null) || return 0
+  printf '%s\n' "$2" > "$gitdir/wt-item" 2>/dev/null || true
+}
+
+# The URL of what worktree $1 (on branch $2) is for: the one recorded when it
+# was made, or for an older worktree, one worked out from its branch name - a
+# leading number is a GitHub issue of its origin, a leading KEY-123 a Jira
+# ticket once WT_JIRA_URL is set. Prints nothing when there is no telling.
+item_url_for() {
+  local wt_path="$1" branch="$2" gitdir url=""
+  if gitdir=$(git -C "$wt_path" rev-parse --absolute-git-dir 2>/dev/null) \
+     && [[ -s "$gitdir/wt-item" ]]; then
+    url=$(head -n 1 "$gitdir/wt-item" 2>/dev/null || true)
+    [[ -z "$url" ]] || { echo "$url"; return 0; }
+  fi
+  if [[ "$branch" =~ ^([0-9]+)(-|$) ]]; then
+    local origin; origin=$(git -C "$wt_path" remote get-url origin 2>/dev/null) || return 0
+    origin="${origin%.git}"
+    if [[ "$origin" =~ ^git@([^:]+):(.+)$ ]]; then
+      origin="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    elif [[ "$origin" =~ ^ssh://git@([^/]+)/(.+)$ ]]; then
+      origin="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    fi
+    [[ "$origin" == https://* ]] || return 0
+    echo "$origin/issues/${branch%%-*}"
+  elif [[ -n "${WT_JIRA_URL:-}" && "$branch" =~ ^([A-Z][A-Z0-9_]+-[0-9]+)(-|$) ]]; then
+    echo "${WT_JIRA_URL%/}/browse/${BASH_REMATCH[1]}"
+  fi
 }
 
 require_gh() {
