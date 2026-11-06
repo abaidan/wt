@@ -377,6 +377,11 @@ ticket it was made for, and what its `claude` is doing, from the
 `error`, `ended`, or `crashed` when its process is gone mid-turn. Pull requests
 are looked up with one GitHub query per repo, not one per worktree.
 
+`wt go <worktree>` switches to a worktree's tab, or opens one with `claude`,
+from any directory, like `wt open` but without having to be in its repo. The
+worktree is named as `wt status` shows it, `<repo>/<dir>`, or just by its
+directory or branch when no other repo has one by that name.
+
 `--json` also gives each session's last message, its transcript and how long
 that has been quiet, and whether a tab is open in it. The tab comes from
 iTerm2 when it can say, and is `null` when it can't.

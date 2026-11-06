@@ -29,6 +29,8 @@
 #                             request and what its claude is doing
 #   wt events [--wait]        What those claudes have been doing; --wait blocks
 #                             until one needs looking at
+#   wt go <worktree>          Switch to a worktree's tab (or open one), from any
+#                             directory; <repo>/<dir> as `wt status` shows it
 #   wt --version              Print the installed version
 #
 # Env vars:
@@ -2080,6 +2082,39 @@ cmd_events() {
     perl -e "$WT_EVENTS_PL"
 }
 
+# The path of the worktree that $1 names, from anywhere: an absolute path,
+# "<repo>/<dir>" as `wt status` shows it, or a bare directory or branch name
+# when only one repo has it. Dies listing the candidates when it's ambiguous.
+resolve_worktree_arg() {
+  local arg="${1%/}"
+  [[ -n "$arg" ]] || die "which worktree? (see 'wt status')"
+  if [[ "$arg" == /* ]]; then
+    [[ -d "$arg" ]] || die "no such directory: $arg"
+    echo "$arg"
+    return
+  fi
+  local -a hits=()
+  local repo main path branch _rest
+  while IFS=$'\t' read -r repo main path branch _rest; do
+    if [[ "$arg" == "$repo/${path##*/}" || "$arg" == "${path##*/}" || "$arg" == "$branch" ]]; then
+      hits[${#hits[@]}]="$path"
+    fi
+  done < <(all_worktrees)
+  case ${#hits[@]} in
+    0) die "no worktree called '$arg' (see 'wt status')" ;;
+    1) echo "${hits[0]}" ;;
+    *) die "'$arg' could be any of these; give it as <repo>/<dir>:
+$(printf '  %s\n' "${hits[@]}")" ;;
+  esac
+}
+
+# `wt go <worktree>`: switch to that worktree's tab, or open one with claude,
+# from any directory.
+cmd_go() {
+  local wt_path; wt_path=$(resolve_worktree_arg "${1:-}") || exit 1
+  open_worktree "$wt_path"
+}
+
 # `wt status [--json] [--no-pr]`: every worktree across all repos, with its
 # pull request and what the claude in it is doing. --json is for the
 # orchestrator; --no-pr (or WT_NO_PR=1) skips asking GitHub.
@@ -3188,6 +3223,9 @@ Usage:
   wt events [--wait] [--since <cursor>] [--timeout <s>] [--all]
                           The claude sessions' changes of state, as JSON
                           lines; --wait blocks until one needs looking at
+  wt go <worktree>        Switch to that worktree's tab, or open one, from any
+                          directory: <repo>/<dir> as "wt status" shows it, or
+                          just <dir> or the branch when that is unambiguous
   wt --version            Print the installed version
 
 Env vars:
@@ -3237,6 +3275,7 @@ case "${1:-}" in
   __hook) shift; cmd_hook "$@" ;;
   status) shift; cmd_status "$@" ;;
   events) shift; cmd_events "$@" ;;
+  go)   shift; cmd_go "$@" ;;
   __ui) shift; cmd_ui_action "$@" ;;
   -V|--version|version) echo "wt $WT_VERSION" ;;
   "") cmd_ui issues 0 ;;
