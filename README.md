@@ -91,8 +91,9 @@ wt                      # open the picker on the Issues tab
 | <kbd>Tab</kbd> / <kbd>⇧Tab</kbd> | Next / previous tab: Issues, Pull requests, Jira (when set up), Worktrees |
 | <kbd>Enter</kbd> | Go to it: switch to the worktree's iTerm2 tab, or open one — and for an issue, pull request or ticket with no worktree yet, create it first, exactly as `wt new` does. With rows marked, it does that for each of them in turn, opening a tab and a `claude` per item. The picker stays open in its own tab, ready for the next one; only an error waits for a key |
 | <kbd>alt-m</kbd> | Only mine: issues assigned to you, pull requests you opened, tickets assigned to you. Press again for everyone's |
-| <kbd>ctrl-t</kbd> | Mark a row (<kbd>ctrl-space</kbd> works too, where macOS has not taken it for Spotlight or input sources), to open or create several at once with <kbd>Enter</kbd> — or, on the Worktrees tab, to remove several with <kbd>ctrl-x</kbd>. Marks are per tab: switching tabs clears them |
+| <kbd>ctrl-t</kbd>, <kbd>⇧↓</kbd> / <kbd>⇧↑</kbd> | Mark a row, to open or create several at once with <kbd>Enter</kbd> — or, on the Worktrees tab, to remove several with <kbd>ctrl-x</kbd>. Shift-arrows mark the row and move on, so holding shift marks a run; <kbd>ctrl-space</kbd> marks too, where macOS has not taken it for Spotlight or input sources. Marks are per tab: switching tabs clears them |
 | <kbd>ctrl-x</kbd> | On the Worktrees tab: remove the marked worktrees, or the one under the cursor, with the same questions as `wt rm`; then back to the picker |
+| <kbd>alt-↓</kbd> / <kbd>alt-↑</kbd> | Scroll the preview (what shift-arrows did before) |
 | <kbd>Esc</kbd> | Quit the picker |
 
 Issues, pull requests and tickets that have a worktree carry a mark saying so:

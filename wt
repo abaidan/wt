@@ -3090,9 +3090,9 @@ ui_prompt() { printf '%s > ' "$(ui_get tab)"; }
 
 ui_hints() {
   if [[ "$(ui_get tab)" == "worktrees" ]]; then
-    echo "tab next view · enter open · ctrl-t mark · ctrl-x remove · esc quit"
+    echo "tab next view · enter open · ctrl-t/shift-↑↓ mark · ctrl-x remove · esc quit"
   else
-    echo "tab next view · enter open or create · ctrl-t mark · alt-m only mine · esc quit"
+    echo "tab next view · enter open or create · ctrl-t/shift-↑↓ mark · alt-m only mine · esc quit"
   fi
 }
 
@@ -3525,6 +3525,10 @@ cmd_ui() {
     --bind="shift-tab:transform($self __ui switch -1)" \
     --bind="ctrl-t:toggle" \
     --bind="ctrl-space:toggle" \
+    --bind="shift-down:toggle+down" \
+    --bind="shift-up:toggle+up" \
+    --bind="alt-down:preview-down" \
+    --bind="alt-up:preview-up" \
     --bind="alt-m:transform($self __ui mine)" \
     --bind="ctrl-x:transform($self __ui rm-key)" \
     --bind="enter:execute($self __ui go {+f})+clear-selection+reload($self __ui rows)" \
@@ -3558,7 +3562,7 @@ Usage:
   wt                      Open the picker: a tab each for issues, pull requests,
                           Jira tickets and worktrees (tab switches; enter goes
                           to the worktree, creating it if need be - or to every
-                          marked one, ctrl-t marking; alt-m only mine;
+                          marked one, ctrl-t or shift-arrows marking; alt-m only mine;
                           ctrl-x removes a worktree)
   wt new                  Pick an open GitHub issue from a list, then branch from it
   wt new --mine           Same, narrowed to issues assigned to you
