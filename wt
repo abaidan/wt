@@ -3092,7 +3092,7 @@ ui_hints() {
   if [[ "$(ui_get tab)" == "worktrees" ]]; then
     echo "tab next view · enter open · ctrl-space mark · ctrl-x remove · esc quit"
   else
-    echo "tab next view · enter open or create · alt-m only mine · esc quit"
+    echo "tab next view · enter open or create · ctrl-space mark · alt-m only mine · esc quit"
   fi
 }
 
@@ -3421,22 +3421,39 @@ ui_preview() {
   esac
 }
 
-# `wt __ui go <kind> <id>`: what enter does. fzf runs it and then comes back,
-# so the picker stays open in its own tab while the worktree opens in
-# another. Everything but a worktree goes through `wt new`, which switches to
-# the worktree when there already is one. What it prints shows while it
-# works; only a failure waits for a key, so that it can be read.
+# `wt __ui go <file>`: what enter does, for the rows listed in the file - the
+# marked ones, or the one under the cursor when none is marked. fzf runs it
+# and then comes back, so the picker stays open in its own tab while each
+# worktree opens in another. Everything but a worktree goes through `wt new`,
+# which switches to the worktree when there already is one. They are opened
+# one after another, not all at once: each new iTerm2 tab is found as the
+# window's current one, which two at a time would race for. What it prints
+# shows while it works; only a failure waits for a key, so that it can be
+# read.
 ui_go() {
-  local kind="$1"
-  [[ "$kind" != "msg" ]] || return 0
+  local file="$1" kind id rest n=0 i=0 failed=0
+  local -a kinds=() ids=()
+  while IFS=$'\t' read -r kind id rest; do
+    [[ -n "$kind" && "$kind" != "msg" ]] || continue
+    kinds[n]="$kind"; ids[n]="$id"; n=$((n + 1))
+  done < "$file"
+  (( n > 0 )) || return 0
+  WT_COLOR=$(ui_get color)
   printf '\033[H\033[J'
-  local rc=0
-  ( ui_go_one "$@" ) < /dev/tty || rc=$?
-  if (( rc != 0 )); then
+  while (( i < n )); do
+    if (( n > 1 )); then
+      (( i == 0 )) || echo
+      paint 1 "[$((i + 1))/$n]"; echo
+    fi
+    ( ui_go_one "${kinds[i]}" "${ids[i]}" ) < /dev/tty || failed=$((failed + 1))
+    i=$((i + 1))
+  done
+  if (( failed > 0 )); then
     echo
+    (( n == 1 )) || echo "$failed of $n failed."
     read -r -s -n 1 -p "Press any key to go back to the picker." < /dev/tty || true
   fi
-  # The item now has a worktree, and maybe a tab: its mark has changed.
+  # The items now have worktrees, and maybe tabs: their marks have changed.
   rm -f "$WT_UI"/rows-* 2>/dev/null || true
 }
 
@@ -3509,7 +3526,7 @@ cmd_ui() {
     --bind="ctrl-space:toggle" \
     --bind="alt-m:transform($self __ui mine)" \
     --bind="ctrl-x:transform($self __ui rm-key)" \
-    --bind="enter:execute($self __ui go {1} {2})+reload($self __ui rows)" \
+    --bind="enter:execute($self __ui go {+f})+clear-selection+reload($self __ui rows)" \
     < /dev/null || true
 }
 
@@ -3539,8 +3556,9 @@ wt - git worktree helper with GitHub and Jira integration and iTerm2 automation
 Usage:
   wt                      Open the picker: a tab each for issues, pull requests,
                           Jira tickets and worktrees (tab switches; enter goes
-                          to the worktree, creating it if need be; alt-m only
-                          mine; ctrl-x removes a worktree, ctrl-space marks)
+                          to the worktree, creating it if need be - or to every
+                          marked one, ctrl-space marking; alt-m only mine;
+                          ctrl-x removes a worktree)
   wt new                  Pick an open GitHub issue from a list, then branch from it
   wt new --mine           Same, narrowed to issues assigned to you
   wt new <issue-number>   Create a worktree/branch named after GitHub issue #<n>
