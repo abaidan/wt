@@ -776,6 +776,11 @@ cmd_hook() {
 open_worktree() {
   local wt_path="$1" template="${2:-}" url="${3:-}"
 
+  # Said here rather than left to the tab, whose `cd` would fail and leave a
+  # shell that takes claude's prompt as a command. Callers in the picker run
+  # with errexit off, so this is the last line of defence.
+  [[ -d "$wt_path" ]] || die "$(short_path "$wt_path") does not exist; not opening a tab in it"
+
   if [[ -z "$url" ]] && focus_existing_tab "$wt_path"; then
     echo "Switched to the tab already open in it"
     return
@@ -1001,6 +1006,9 @@ while (my $line = <STDIN>) {
 }
 for my $r (@rows) {
   my ($id, $shown, $wp, $title, $cell) = @$r;
+  # WT_MAP: which worktree each row stands for, as "<id><TAB><path>" - the
+  # one its [worktree] mark is about, for ctrl-x to remove.
+  if ($ENV{WT_MAP}) { print "$id\t$wp\n" if defined $wp; next }
   my $col = "";
   if ($prw) {
     $col = $cell ? paint($cell->[1], $cell->[0]) . " " x ($prw - $cell->[2]) : " " x $prw;
@@ -1358,6 +1366,15 @@ new_pr_worktree() {
     open_worktree "$wt_path"
     return
   fi
+
+  # Registered at this very path, but the directory is gone - deleted by hand,
+  # say, after its branch was switched to something else, so the lookups by
+  # branch above missed it. `worktree add` refuses the path until it is pruned.
+  if [[ ! -e "$wt_path" ]] && worktree_is_registered "$root" "$wt_path"; then
+    echo "Clearing stale worktree registration at $(short_path "$wt_path")"
+    git -C "$root" worktree prune
+  fi
+
   [[ -e "$wt_path" ]] \
     && die "path already exists and is not a worktree for '$branch': $wt_path"
 
@@ -1390,14 +1407,17 @@ new_pr_worktree() {
       fi
     fi
     echo "Creating worktree at $wt_path (existing branch: $branch)"
-    git -C "$root" worktree add "$wt_path" "$branch"
+    git -C "$root" worktree add "$wt_path" "$branch" \
+      || die "could not create the worktree at $wt_path"
   elif [[ "$cross" == "true" ]]; then
     echo "Creating worktree at $wt_path (branch: $branch, from a fork)"
-    git -C "$root" worktree add -b "$branch" "$wt_path" "$tip"
+    git -C "$root" worktree add -b "$branch" "$wt_path" "$tip" \
+      || die "could not create the worktree at $wt_path"
     echo "  It has no upstream: 'git push' there needs a remote for the fork."
   else
     echo "Creating worktree at $wt_path (branch: $branch)"
-    git -C "$root" worktree add --track -b "$branch" "$wt_path" "origin/$head"
+    git -C "$root" worktree add --track -b "$branch" "$wt_path" "origin/$head" \
+      || die "could not create the worktree at $wt_path"
   fi
 
   open_worktree "$wt_path" "$WT_PR_PROMPT_TEMPLATE" "$url"
@@ -1569,6 +1589,10 @@ cmd_new() {
         open_worktree "$found_path"
         return
       fi
+      # Its directory is gone: nothing left to open, and the entry would go on
+      # marking the issue [worktree] in the picker.
+      echo "Clearing stale worktree registration at $(short_path "$found_path")"
+      git -C "$root" worktree prune
     fi
   fi
 
@@ -1579,6 +1603,14 @@ cmd_new() {
     echo "Worktree at $(short_path "$wt_path") already exists (now on '$on'), opening it."
     open_worktree "$wt_path"
     return
+  fi
+
+  # Registered at this very path, but the directory is gone - deleted by hand,
+  # say, after its branch was switched to something else, so the lookups by
+  # branch above missed it. `worktree add` refuses the path until it is pruned.
+  if [[ ! -e "$wt_path" ]] && worktree_is_registered "$root" "$wt_path"; then
+    echo "Clearing stale worktree registration at $(short_path "$wt_path")"
+    git -C "$root" worktree prune
   fi
 
   # A directory in the way that git knows nothing about needs a human.
@@ -1593,13 +1625,16 @@ cmd_new() {
     # Branch left behind by an earlier `wt rm` that kept it: check it out
     # rather than failing on `-b`, which refuses an existing branch.
     echo "Creating worktree at $wt_path (existing branch: $branch)"
-    git -C "$root" worktree add "$wt_path" "$branch"
+    git -C "$root" worktree add "$wt_path" "$branch" \
+      || die "could not create the worktree at $wt_path"
   else
     echo "Creating worktree at $wt_path (branch: $branch, base: $base)"
     if git -C "$root" show-ref --verify --quiet "refs/remotes/origin/$base"; then
-      git -C "$root" worktree add -b "$branch" "$wt_path" "origin/$base"
+      git -C "$root" worktree add -b "$branch" "$wt_path" "origin/$base" \
+      || die "could not create the worktree at $wt_path"
     else
-      git -C "$root" worktree add -b "$branch" "$wt_path" "$base"
+      git -C "$root" worktree add -b "$branch" "$wt_path" "$base" \
+      || die "could not create the worktree at $wt_path"
     fi
   fi
 
@@ -3092,7 +3127,7 @@ ui_hints() {
   if [[ "$(ui_get tab)" == "worktrees" ]]; then
     echo "tab next view · enter open · ctrl-t/shift-↑↓ mark · ctrl-x remove · esc quit"
   else
-    echo "tab next view · enter open or create · ctrl-t/shift-↑↓ mark · alt-m only mine · esc quit"
+    echo "tab next view · enter open or create · ctrl-t/shift-↑↓ mark · ctrl-x remove worktree · alt-m only mine · esc quit"
   fi
 }
 
@@ -3374,9 +3409,9 @@ ui_mine() {
 }
 
 # `wt __ui rm-key`: what ctrl-x does - remove the marked worktrees, or the one
-# under the cursor, but only on the worktrees tab.
+# under the cursor. On the issues, pull requests and Jira tabs, that is the
+# worktree a row is marked as having.
 ui_rm_key() {
-  [[ "$(ui_get tab)" == "worktrees" ]] || return 0
   local self; self=$(printf '%q' "$WT_SELF")
   printf 'execute(%s __ui rm {+f})+clear-selection+reload(%s __ui rows)' "$self" "$self"
 }
@@ -3385,16 +3420,30 @@ ui_rm_key() {
 # asking what remove_one_worktree asks, then wait for a key so the outcome can
 # be read before fzf draws over it.
 ui_rm() {
-  local file="$1" root main kind path rest branch n=0
+  local file="$1" root main kind id rest path branch n=0 map="" done_paths=$'\n'
   root=$(ui_get root)
   main=$(main_worktree "$root")
   # fzf leaves its list on screen under a command it runs; clear it first, so
   # the questions are not printed over the rows.
   printf '\033[H\033[J'
-  while IFS=$'\t' read -r kind path rest; do
-    [[ "$kind" == "wt" && -n "$path" ]] || continue
+  while IFS=$'\t' read -r kind id rest; do
+    [[ -n "$kind" && "$kind" != "msg" && -n "$id" ]] || continue
     n=$((n + 1))
     echo
+    if [[ "$kind" == "wt" ]]; then
+      path="$id"
+    else
+      [[ -n "$map" ]] || map=$(ui_item_worktrees "$kind")
+      path=$(printf '%s\n' "$map" | awk -F'\t' -v i="$id" '$1 == i { print $2; exit }')
+      if [[ -z "$path" ]]; then
+        echo "$(ui_item_label "$kind" "$id") has no worktree to remove."
+        continue
+      fi
+      echo "$(ui_item_label "$kind" "$id"): $(short_path "$path")"
+    fi
+    # Two marked rows can stand for the same worktree.
+    [[ "$done_paths" != *$'\n'"$path"$'\n'* ]] || continue
+    done_paths+="$path"$'\n'
     if [[ "$path" == "$main" ]]; then
       echo "Skipping the main working tree: it cannot be removed."
       continue
@@ -3407,6 +3456,30 @@ ui_rm() {
   rm -f "$WT_UI"/rows-* 2>/dev/null || true
   echo
   read -r -s -n 1 -p "Press any key to go back to the picker." < /dev/tty || true
+}
+
+# The "<id><TAB><path>" pairs of the rows of kind $1 that have a worktree, from
+# the same cached list and the same matching that drew their marks.
+ui_item_worktrees() {
+  local kind="$1" tab root cache
+  case "$kind" in
+    issue) tab="issues" ;;
+    pr)    tab="prs" ;;
+    jira)  tab="jira" ;;
+    *)     return 0 ;;
+  esac
+  root=$(ui_get root)
+  cache=$(ui_get cache)
+  [[ "$kind" == "pr" ]] || WT_PR_INDEX=$(cat "$cache/prindex-0" 2>/dev/null || true)
+  WT_MAP=1 item_rows "$kind" "$root" "$(cat "$cache/$tab-$(ui_get mine)" 2>/dev/null || true)"
+}
+
+ui_item_label() {
+  case "$1" in
+    issue) echo "Issue #$2" ;;
+    pr)    echo "Pull request #$2" ;;
+    *)     echo "$2" ;;
+  esac
 }
 
 # `wt __ui preview <kind> <id>`
